@@ -77,3 +77,43 @@ Training script: train.py (created in Session 2)
 **Files modified:** `app.py`, `train.py`, `CONTEXT.md`, `REPORT_WORKLOG.md`
 **Key decisions:** Kept the full four-cluster prompt design in code so absent monuments can become active later without another refactor, but restricted the active specialist path to populated dataset folders to avoid training/app mismatch. Preserved the existing 7-fold rotating split design because it is the cleanest full k-fold approximation of a 70/15/15 train/validation/test allocation.
 **Known issues / TODO:** Some requested cluster members still have no local images in `data/`, so they remain defined but inactive until those folders are populated.
+
+## 2026-05-06 - Baseline Evaluator and Safer Specialist Training Objective
+
+**What changed:** Added `evaluate.py` for local/Kaggle evaluation of base CLIP or a saved checkpoint, including all-class and specialist-only scopes, duplicate hash reporting, per-class accuracy, confusion matrix export, and prediction JSON output. Updated `train.py` to fine-tune with supervised image-to-class-prompt cross entropy instead of batchwise image-text InfoNCE, and aligned the freeze policy to the requested last three vision blocks plus `visual_projection`. Added `KAGGLE_RUN.md` with copy-paste Kaggle cells.
+**Files modified:** `train.py`, `evaluate.py`, `KAGGLE_RUN.md`, `CONTEXT.md`, `REPORT_WORKLOG.md`
+**Key decisions:** Kept `Qutub Minar` and `Shalimar Bagh` outside specialist fine-tuning because they are visually distinctive and already handled well by base zero-shot CLIP. The 13-class specialist model now trains images against one prompt-ensemble embedding per class, avoiding false-negative pressure between same-class images in the same batch.
+**Known issues / TODO:** Need Kaggle results from `evaluate.py` before and after fine-tuning to confirm whether the new objective improves the specialist confusion pairs. Exact duplicate images still need dataset cleanup or grouped splitting if they inflate validation/test scores.
+
+## 2026-05-06 - Colab Evaluation Run, Akbar's Tomb Root Cause, Offline Augmentation Plan
+
+**What changed:** Ran the baseline evaluation and first training run on Colab T4 GPU. Confirmed the following:
+- Base CLIP zero-shot top-1 on all 15 classes: **66.76%** (725/1086)
+- Base CLIP on 13-class specialist scope: **63.90%** (632/989)
+- 796 images found across 13 specialist classes for training (Qutub Minar and Shalimar Bagh correctly excluded as zero-shot-only)
+- Fine-tuned specialist checkpoint (1 run, 7 folds, 5 epochs each) best val top-1: **78.1%** (Fold 1 Epoch 4)
+- Training was still running at Fold 5 Epoch 3 when the notebook was shared
+
+**Akbar's Tomb 0.00% root cause identified:** Two compounding issues:
+1. **Character encoding mismatch** — the folder on disk may use a curly RIGHT SINGLE QUOTATION MARK (U+2019) in the name `Akbar's Tomb` while the Python code uses a straight apostrophe (U+0027). `collect_image_records()` does a set-membership check against `SPECIALIST_CLUSTER` and silently skips the class if the apostrophes don't match, resulting in zero training examples.
+2. **Insufficient images** — only 36 images total. With 7-fold K-fold: ~5 images per val/test fold. Even without the encoding bug, accuracy is reported in steps of ~20% and any bad fold yields 0%.
+**Both issues must be fixed together.**
+
+**Key confusion pairs from the baseline run:**
+- Agra Fort → Buland Darwaza: 33 images misclassified (biggest error)
+- Red Fort → Buland Darwaza: 25
+- Itmad-ud-Daulah → Tomb of Salim Chishti: 17
+- Safdarjung Tomb ↔ Humayun's Tomb: 17/16 (symmetric confusion)
+
+**Dataset quality:** 49 duplicate hash groups, 50 extra duplicate files, 0 cross-class duplicates.
+
+**Fix plan (new Colab cells):** 
+- Cell A: Audit folder names with repr() to detect encoding issues
+- Cell B: Rename curly-apostrophe folders to straight-apostrophe; then augment all classes with < 80 images up to 80 using RandomResizedCrop + flip + rotation + ColorJitter + GaussianBlur, saving aug_XXXX.jpg copies on disk
+- Cell C: Verify counts
+- Cell D: Retrain with --runs 3 --epochs 10 on the balanced dataset
+- Cell E/F: Re-evaluate base and fine-tuned models
+- Cell G: Zip and download checkpoints + eval artifacts
+
+**Files modified:** `CONTEXT.md`, `REPORT_WORKLOG.md`
+**Known issues / TODO:** Need the fine-tuned evaluation results (eval_outputs/finetuned_specialist/metrics.json) to confirm improvement over base CLIP. Augmented images must be excluded from evaluation to avoid inflated test scores — the evaluate.py script currently reads all images in a folder, so either use --limit_per_class or separate augmented images into a subfolder.

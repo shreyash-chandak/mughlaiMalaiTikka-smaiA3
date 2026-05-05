@@ -5,11 +5,20 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+
 import streamlit as st
 import torch
 from PIL import Image, ImageEnhance, ImageOps
-from streamlit_paste_button import paste_image_button
 from transformers import CLIPModel, CLIPProcessor
+
+try:
+    from streamlit_paste_button import paste_image_button
+except ModuleNotFoundError:
+    paste_image_button = None
 
 
 MODEL_NAME = "openai/clip-vit-base-patch32"
@@ -1478,6 +1487,10 @@ def image_from_clipboard() -> Image.Image | None:
     Returns:
         Image.Image | None: Clipboard image, or ``None`` if nothing has been pasted.
     """
+
+    if paste_image_button is None:
+        st.info("Clipboard paste support is unavailable until streamlit-paste-button is installed.")
+        return st.session_state.get("pasted_image")
 
     result = paste_image_button(
         label="Paste screenshot from clipboard",

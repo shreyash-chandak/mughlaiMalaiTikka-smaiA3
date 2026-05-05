@@ -8,6 +8,11 @@ from datetime import datetime
 from functools import partial
 from typing import Any
 
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TRANSFORMERS_NO_FLAX", "1")
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("USE_FLAX", "0")
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -25,7 +30,8 @@ from app import MODEL_NAME, PROMPT_ENSEMBLES, SPECIALIST_CLUSTER, extract_image_
 
 
 APPROX_K_FOLDS = 7
-TRAINABLE_VISION_BLOCKS = (7, 8, 9, 10, 11)
+TRAINABLE_VISION_BLOCKS = (9, 10, 11)
+CLASSIFICATION_TEMPERATURE = 0.07
 
 
 @dataclass
@@ -190,24 +196,29 @@ def build_transforms() -> tuple[transforms.Compose, transforms.Compose]:
     return original_transform, augmented_transform
 
 
-def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], Counter]:
-    """Collect image paths from the dataset directory using supported class-folder names.
+def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], list[ImageRecord], Counter]:
+    """Collect image paths, separating real from offline-augmented (aug_*) images.
+
+    Augmented images are returned separately so they can be added to training
+    folds only, preventing data leakage into validation and test splits.
 
     Args:
         data_dir: Root data directory.
 
     Returns:
-        tuple[list[ImageRecord], Counter]: Image records and class-count statistics.
+        tuple[list[ImageRecord], list[ImageRecord], Counter]:
+            Real image records, augmented image records, and class-count statistics (real only).
     """
 
     class_counts: Counter = Counter()
     valid_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
     supported_classes = set(SPECIALIST_CLUSTER)
-    grouped_paths: defaultdict[str, list[str]] = defaultdict(list)
+    grouped_real: defaultdict[str, list[str]] = defaultdict(list)
+    grouped_aug: defaultdict[str, list[str]] = defaultdict(list)
 
     if not os.path.isdir(data_dir):
         print(f"Warning: data directory '{data_dir}' does not exist. No images were found.")
-        return [], class_counts
+        return [], [], class_counts
 
     for root, _, files in os.walk(data_dir):
         class_name = os.path.basename(root)
@@ -217,18 +228,25 @@ def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], Counter]:
         for file_name in sorted(files):
             image_path = os.path.join(root, file_name)
             if os.path.isfile(image_path) and os.path.splitext(file_name)[1].lower() in valid_suffixes:
-                grouped_paths[class_name].append(image_path)
+                if file_name.startswith("aug_"):
+                    grouped_aug[class_name].append(image_path)
+                else:
+                    grouped_real[class_name].append(image_path)
 
-    image_records: list[ImageRecord] = []
-    for class_name, image_paths in grouped_paths.items():
+    real_records: list[ImageRecord] = []
+    for class_name, image_paths in grouped_real.items():
         if len(image_paths) > 80:
             image_paths = random.sample(image_paths, 80)
-
         for image_path in sorted(image_paths):
-            image_records.append(ImageRecord(image_path=image_path, monument_name=class_name))
+            real_records.append(ImageRecord(image_path=image_path, monument_name=class_name))
             class_counts[class_name] += 1
 
-    return image_records, class_counts
+    aug_records: list[ImageRecord] = []
+    for class_name, image_paths in grouped_aug.items():
+        for image_path in sorted(image_paths):
+            aug_records.append(ImageRecord(image_path=image_path, monument_name=class_name))
+
+    return real_records, aug_records, class_counts
 
 
 def warn_underpopulated_classes(class_names: list[str], class_counts: Counter) -> None:
@@ -309,27 +327,30 @@ def collate_batch(
     return encoded, list(labels)
 
 
-def contrastive_loss(image_features: torch.Tensor, text_features: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
-    """Compute the symmetric CLIP-style InfoNCE loss.
+def class_prompt_loss(
+    image_features: torch.Tensor,
+    class_embeddings: torch.Tensor,
+    target_indices: torch.Tensor,
+    temperature: float = CLASSIFICATION_TEMPERATURE,
+) -> torch.Tensor:
+    """Compute supervised class loss against frozen CLIP class-prompt embeddings.
 
     Args:
         image_features: Normalized image embeddings.
-        text_features: Normalized text embeddings.
+        class_embeddings: Normalized text embeddings, one per trainable class.
+        target_indices: Integer class labels for each image in the batch.
         temperature: Temperature used to scale logits.
 
     Returns:
-        torch.Tensor: Scalar contrastive loss.
+        torch.Tensor: Scalar cross-entropy loss.
     """
 
-    logits = (image_features @ text_features.T) / temperature
-    labels = torch.arange(len(logits), device=logits.device)
-    loss_i2t = F.cross_entropy(logits, labels)
-    loss_t2i = F.cross_entropy(logits.T, labels)
-    return (loss_i2t + loss_t2i) / 2
+    logits = (image_features @ class_embeddings.T) / temperature
+    return F.cross_entropy(logits, target_indices, label_smoothing=0.1)
 
 
 def freeze_for_finetuning(model: CLIPModel) -> None:
-    """Freeze CLIP parameters except the last five vision blocks and visual projection.
+    """Freeze CLIP parameters except the last three vision blocks and visual projection.
 
     Args:
         model: CLIP model to prepare for fine-tuning.
@@ -511,6 +532,8 @@ def train_one_epoch(
     scaler: GradScaler,
     device: torch.device,
     use_amp: bool,
+    class_embeddings: torch.Tensor,
+    class_to_index: dict[str, int],
 ) -> float:
     """Run one training epoch and return the mean loss.
 
@@ -521,6 +544,8 @@ def train_one_epoch(
         scaler: Mixed-precision gradient scaler.
         device: Torch device for training.
         use_amp: Whether AMP should be enabled.
+        class_embeddings: Prompt-derived class embeddings used as supervised targets.
+        class_to_index: Mapping from class name to class index.
 
     Returns:
         float: Mean training loss for the epoch.
@@ -531,15 +556,15 @@ def train_one_epoch(
     total_batches = 0
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
 
-    for batch_inputs, _ in progress_bar:
+    for batch_inputs, labels in progress_bar:
         batch_inputs = move_batch_to_device(batch_inputs, device)
+        target_indices = torch.tensor([class_to_index[label] for label in labels], dtype=torch.long, device=device)
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(enabled=use_amp):
-            outputs = model(**batch_inputs)
-            image_features = normalize(outputs.image_embeds)
-            text_features = normalize(outputs.text_embeds)
-            loss = contrastive_loss(image_features, text_features)
+            image_features = extract_image_features(model, batch_inputs["pixel_values"])
+            image_features = normalize(image_features)
+            loss = class_prompt_loss(image_features, class_embeddings, target_indices)
 
         if use_amp:
             scaler.scale(loss).backward()
@@ -678,9 +703,12 @@ def run_fold_training(
         use_cuda=use_amp,
         eval_seed_base=eval_seed_base,
     )
-    optimizer = AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=1e-6, weight_decay=0.01)
+    optimizer = AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=2e-6, weight_decay=0.01)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = GradScaler(enabled=use_amp)
+    _, class_embeddings = encode_prompt_ensembles(model, processor, device, class_names)
+    class_embeddings = class_embeddings.detach()
+    class_to_index = {name: index for index, name in enumerate(class_names)}
 
     best_val_top1 = -1.0
     best_test_top1 = 0.0
@@ -691,7 +719,16 @@ def run_fold_training(
 
     for epoch_index in range(args.epochs):
         epochs_ran = epoch_index + 1
-        train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, use_amp)
+        train_loss = train_one_epoch(
+            model=model,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            scaler=scaler,
+            device=device,
+            use_amp=use_amp,
+            class_embeddings=class_embeddings,
+            class_to_index=class_to_index,
+        )
         model.eval()
         val_top1, _ = evaluate_zero_shot_top1(model, processor, val_loader, device, class_names, "validation")
         test_top1, test_per_class_accuracy = evaluate_zero_shot_top1(model, processor, test_loader, device, class_names, "test")
@@ -721,7 +758,8 @@ def run_fold_training(
                     "best_fold": fold_index,
                     "class_names": class_names,
                     "base_model": MODEL_NAME,
-                    "frozen_layers": "text_model + text_projection + vision layers 0-6",
+                    "frozen_layers": "text_model + text_projection + vision layers 0-8",
+                    "training_objective": "image-to-class-prompt cross entropy",
                     "timestamp": datetime.utcnow().isoformat(),
                 }
                 save_checkpoint(model, processor, args.output_dir, training_log)
@@ -765,15 +803,15 @@ def run_training_once(
     """
 
     set_seed(run_seed)
-    records, class_counts = collect_image_records(args.data_dir)
-    class_names = sorted(set(record.monument_name for record in records))
+    real_records, aug_records, class_counts = collect_image_records(args.data_dir)
+    class_names = sorted(set(record.monument_name for record in real_records))
     warn_underpopulated_classes(class_names, class_counts)
 
-    if len(records) < 3:
+    if len(real_records) < 3:
         return {
             "run_index": run_index,
             "seed": run_seed,
-            "record_count": len(records),
+            "record_count": len(real_records),
             "class_names": class_names,
             "fold_results": [],
             "mean_val_top1": 0.0,
@@ -781,12 +819,12 @@ def run_training_once(
             "per_class_accuracy": {},
         }, global_best_val_top1
 
-    fold_splits = build_fold_splits(records, run_seed)
+    fold_splits = build_fold_splits(real_records, run_seed)
     if not fold_splits:
         return {
             "run_index": run_index,
             "seed": run_seed,
-            "record_count": len(records),
+            "record_count": len(real_records),
             "class_names": class_names,
             "fold_results": [],
             "mean_val_top1": 0.0,
@@ -795,22 +833,26 @@ def run_training_once(
         }, global_best_val_top1
 
     print(
-        f"Discovered {len(records)} images across {sum(count > 0 for count in class_counts.values())} populated classes. "
-        f"Using {len(fold_splits)} rotating folds for a full k-fold evaluation with an approximate 70/15/15 train/val/test split."
+        f"Discovered {len(real_records)} real + {len(aug_records)} augmented images across "
+        f"{sum(count > 0 for count in class_counts.values())} populated classes. "
+        f"Using {len(fold_splits)} rotating folds. Aug images go to training only."
     )
 
     fold_results: list[dict[str, Any]] = []
     per_class_results: defaultdict[str, list[float]] = defaultdict(list)
     for fold_offset, (train_records, val_records, test_records) in enumerate(fold_splits, start=1):
+        # Add augmented images to training only — keeps val/test clean
+        train_records_with_aug = train_records + aug_records
         print(
             f"\n--- Run {run_index} | Fold {fold_offset}/{len(fold_splits)} ---\n"
-            f"Train images: {len(train_records)} | Val images: {len(val_records)} | Test images: {len(test_records)}"
+            f"Train images: {len(train_records_with_aug)} ({len(train_records)} real + {len(aug_records)} aug) | "
+            f"Val images: {len(val_records)} | Test images: {len(test_records)}"
         )
         fold_summary, global_best_val_top1 = run_fold_training(
             args=args,
             run_index=run_index,
             fold_index=fold_offset,
-            train_records=train_records,
+            train_records=train_records_with_aug,
             val_records=val_records,
             test_records=test_records,
             class_names=class_names,
@@ -833,7 +875,7 @@ def run_training_once(
     return {
         "run_index": run_index,
         "seed": run_seed,
-        "record_count": len(records),
+        "record_count": len(real_records),
         "class_names": class_names,
         "fold_results": fold_results,
         "mean_val_top1": mean_val_top1,
@@ -922,7 +964,8 @@ def main() -> None:
         "class_names": run_summaries[0]["class_names"] if run_summaries else [],
         "per_class_accuracy": aggregated_per_class_accuracy,
         "base_model": MODEL_NAME,
-        "frozen_layers": "text_model + text_projection + vision layers 0-6",
+        "frozen_layers": "text_model + text_projection + vision layers 0-8",
+        "training_objective": "image-to-class-prompt cross entropy",
         "timestamp": datetime.utcnow().isoformat(),
     }
     write_training_log(args.output_dir, final_log)
