@@ -20,9 +20,9 @@ try:
 except ModuleNotFoundError:
     paste_image_button = None
 
-
+st.write("Text color:", st.get_option("theme.textColor"))
 MODEL_NAME = "openai/clip-vit-base-patch32"
-FINETUNED_MODEL_DIR = "clip_mughal_finetuned"
+FINETUNED_MODEL_DIR = "platynator/clip-mughal-model"
 DATA_DIR = "data"
 METADATA_PATH = os.path.join(os.path.dirname(__file__), "metadata.json")
 OOD_THRESHOLD = 0.15  # Random chance is about 6.7% for 15 classes; 15% is a safer boundary between noise and a plausible match.
@@ -841,12 +841,12 @@ class ModelStatus:
 
 @dataclass
 class SpecialistBundle:
-    """Hold an optional fine-tuned specialist model and its restricted prompt bank."""
+    """Hold an optional fine-tuned specialist model and cluster-specific prompt banks."""
 
     model: CLIPModel | None
     processor: CLIPProcessor | None
-    bank: PromptBank | None
-    class_names: list[str]
+    banks_by_group: dict[str, PromptBank]
+    class_to_group: dict[str, str]
 
 
 def load_metadata() -> dict[str, Any]:
@@ -1143,6 +1143,22 @@ def load_training_log(model_dir: str) -> dict[str, Any]:
         return json.load(handle)
 
 
+def get_cluster_name(monument_name: str) -> str | None:
+    """Return the specialist cluster name for a monument, if any.
+
+    Args:
+        monument_name: Predicted or candidate monument class name.
+
+    Returns:
+        str | None: Cluster key from ``SPECIALIST_GROUPS`` when applicable.
+    """
+
+    for group_name, class_names in SPECIALIST_GROUPS.items():
+        if monument_name in class_names:
+            return group_name
+    return None
+
+
 def resolve_model_status(model_dir: str) -> ModelStatus:
     """Determine whether the app should present a base or fine-tuned model badge.
 
@@ -1178,7 +1194,7 @@ def resolve_model_status(model_dir: str) -> ModelStatus:
 
 @st.cache_resource(show_spinner=False)
 def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle, torch.device, ModelStatus]:
-    """Load the base zero-shot CLIP model and an optional fine-tuned specialist model.
+    """Load the base zero-shot CLIP model and an optional local fine-tuned specialist model.
 
     Returns:
         tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle, torch.device, ModelStatus]:
@@ -1193,29 +1209,44 @@ def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle,
     base_model.eval()
     base_bank = build_prompt_bank(base_model, base_processor, device, PROMPT_ENSEMBLES)
 
-    specialist_bundle = SpecialistBundle(model=None, processor=None, bank=None, class_names=[])
+    specialist_bundle = SpecialistBundle(model=None, processor=None, banks_by_group={}, class_to_group={})
     if model_status.is_finetuned:
         specialist_log = load_training_log(FINETUNED_MODEL_DIR)
-        specialist_class_names = specialist_log.get("class_names", [])
-        if not specialist_class_names:
-            specialist_class_names = ACTIVE_SPECIALIST_CLUSTER or SPECIALIST_CLUSTER
+        specialist_class_names = specialist_log.get("class_names") or specialist_log.get("expected_class_names") or []
+        available_specialist_classes = set(specialist_class_names) if specialist_class_names else set(PROMPT_ENSEMBLES)
 
-        specialist_prompts = {
-            class_name: PROMPT_ENSEMBLES[class_name]
-            for class_name in specialist_class_names
-            if class_name in PROMPT_ENSEMBLES
-        }
-        if specialist_prompts:
-            MODEL_ID = "platynator/clip-mughal-model"
-            specialist_model = CLIPModel.from_pretrained(MODEL_ID)
-            specialist_processor = CLIPProcessor.from_pretrained(MODEL_ID)
+        specialist_banks: dict[str, PromptBank] = {}
+        class_to_group: dict[str, str] = {}
+
+        specialist_model = CLIPModel.from_pretrained(FINETUNED_MODEL_DIR).to(device)
+        specialist_processor = CLIPProcessor.from_pretrained(FINETUNED_MODEL_DIR)
+        specialist_model.eval()
+
+        for group_name, group_prompts in ACTIVE_SPECIALIST_PROMPTS.items():
+            filtered_prompts = {
+                class_name: prompts
+                for class_name, prompts in group_prompts.items()
+                if class_name in available_specialist_classes
+            }
+            if not filtered_prompts:
+                continue
+
+            specialist_banks[group_name] = build_prompt_bank(
+                specialist_model,
+                specialist_processor,
+                device,
+                filtered_prompts,
+            )
+            for class_name in filtered_prompts:
+                class_to_group[class_name] = group_name
+
+        if specialist_banks:
             specialist_model.eval()
-            specialist_bank = build_prompt_bank(specialist_model, specialist_processor, device, specialist_prompts)
             specialist_bundle = SpecialistBundle(
                 model=specialist_model,
                 processor=specialist_processor,
-                bank=specialist_bank,
-                class_names=list(specialist_prompts.keys()),
+                banks_by_group=specialist_banks,
+                class_to_group=class_to_group,
             )
 
     return base_model, base_processor, base_bank, specialist_bundle, device, model_status
@@ -1305,6 +1336,7 @@ def predict(
     bank: PromptBank,
     device: torch.device,
     ood_threshold: float = OOD_THRESHOLD,
+    use_specialist_adjustment: bool = False,
 ) -> dict[str, Any]:
     """Predict the most likely monument class and flag out-of-domain inputs.
 
@@ -1315,6 +1347,7 @@ def predict(
         bank: Prompt bank containing cached text features.
         device: Torch device used for inference.
         ood_threshold: Minimum confidence required to be considered in-domain.
+        use_specialist_adjustment: Whether cluster specialist reranking should be applied.
 
     Returns:
         dict[str, Any]: Ranked results, confidence metadata, and an OOD flag.
@@ -1335,7 +1368,8 @@ def predict(
         bank.class_names[idx]: float(class_scores[idx].item())
         for idx in range(len(bank.class_names))
     }
-    candidate_scores = specialist_adjustment(image_features, candidate_scores, bank)
+    if use_specialist_adjustment:
+        candidate_scores = specialist_adjustment(image_features, candidate_scores, bank)
     adjusted_class_scores = torch.tensor(
         [candidate_scores[name] for name in bank.class_names],
         device=device,
@@ -1378,7 +1412,7 @@ def refine_with_specialist(
     specialist_bundle: SpecialistBundle,
     device: torch.device,
 ) -> dict[str, Any]:
-    """Refine zero-shot predictions with the fine-tuned specialist model for cluster classes.
+    """Refine zero-shot predictions only when the top class belongs to a specialist cluster.
 
     Args:
         image: Input monument image.
@@ -1393,27 +1427,39 @@ def refine_with_specialist(
     if zero_shot_prediction["is_ood"]:
         return zero_shot_prediction
 
-    if specialist_bundle.model is None or specialist_bundle.processor is None or specialist_bundle.bank is None:
+    if specialist_bundle.model is None or specialist_bundle.processor is None or not specialist_bundle.banks_by_group:
         return zero_shot_prediction
 
     top_name = zero_shot_prediction["results"][0]["name"]
-    if top_name not in SPECIALIST_CLUSTER or top_name not in specialist_bundle.class_names:
+    cluster_name = specialist_bundle.class_to_group.get(top_name)
+    if cluster_name is None:
+        return zero_shot_prediction
+
+    specialist_bank = specialist_bundle.banks_by_group.get(cluster_name)
+    if specialist_bank is None:
         return zero_shot_prediction
 
     specialist_prediction = predict(
         image=image,
         model=specialist_bundle.model,
         processor=specialist_bundle.processor,
-        bank=specialist_bundle.bank,
+        bank=specialist_bank,
         device=device,
         ood_threshold=SPECIALIST_OOD_THRESHOLD,
+        use_specialist_adjustment=False,
     )
+
+    if specialist_prediction["is_ood"]:
+        return zero_shot_prediction
+
+    cluster_class_names = set(specialist_bank.class_names)
     specialist_prediction["results"].extend(
         result
         for result in zero_shot_prediction["results"]
-        if result["name"] not in specialist_bundle.class_names
+        if result["name"] not in cluster_class_names
     )
     specialist_prediction["refined_by_specialist"] = True
+    specialist_prediction["specialist_cluster"] = cluster_name
     return specialist_prediction
 
 
@@ -1635,12 +1681,13 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
         f"{prediction['prompt_count']} prompts",
         f"{prediction['view_count']} image views",
         f"runner-up: {runner_up['name']}",
+        f"Model Used: {prediction.get('model_used', 'CLIP')}",
     ]
     if prediction.get("refined_by_specialist"):
-        caption_parts.append("specialist refinement active")
+        caption_parts.append(f"specialist refinement active ({prediction.get('specialist_cluster', 'cluster')})")
     st.caption(" | ".join(caption_parts))
 
-    if conf_band == "Low":
+    if False and conf_band == "Low":
         st.warning(
             "Low-confidence result. The top two classes are close, so treat this prediction cautiously.",
             icon="⚠️",
@@ -1807,7 +1854,10 @@ def main() -> None:
             model, processor, bank, specialist_bundle, device, _ = load_clip()
             with st.spinner("Running monument analysis..."):
                 prediction = predict(selected_image, model, processor, bank, device)
+                prediction["model_used"] = "CLIP"
                 prediction = refine_with_specialist(selected_image, prediction, specialist_bundle, device)
+                if prediction.get("refined_by_specialist"):
+                    prediction["model_used"] = "Finetuned"
             if prediction["is_ood"]:
                 render_ood_panel(prediction)
             else:

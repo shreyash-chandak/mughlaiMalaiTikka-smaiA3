@@ -484,3 +484,62 @@ The Streamlit app now matches the full assignment spec: **upload photo → predi
 
 #### 4. Top scores moved to expander
 - Raw score list moved inside `st.expander("See top scores")` so the metadata info card has visual priority
+
+## 2026-05-06 - Zero-Shot First, Cluster-Gated Specialist Flow
+
+### `app.py`
+
+- Changed the active inference workflow to exactly:
+  - image in
+  - base CLIP zero-shot prediction across all 15 monument prompts
+  - if the top class is in a specialist cluster, run the fine-tuned local checkpoint
+  - otherwise show the base CLIP result directly
+- Added `use_specialist_adjustment=False` as the default in `predict()` so the first-stage result is a true zero-shot pass and does not get specialist prompt reranking by default.
+- Changed `SpecialistBundle` from a single shared bank to:
+  - `banks_by_group`
+  - `class_to_group`
+- `load_clip()` now builds one local specialist prompt bank per cluster from `./clip_mughal_finetuned/`, using only the classes actually present in that checkpoint's training log.
+- `refine_with_specialist()` now:
+  - checks the zero-shot top class
+  - finds its cluster
+  - runs the fine-tuned model only on that cluster's specialist prompt bank
+  - falls back to the zero-shot result if the specialist model has no bank for that cluster or returns low confidence
+
+### Important behavior change
+
+- The app no longer routes every image through specialist prompts.
+- Specialist prompts are only used inside the second-stage refinement path for clustered classes.
+- Non-cluster classes such as `Qutub Minar` and `Shalimar Bagh` now stay on the base CLIP result exactly as intended.
+
+### Cleanup note
+
+- The old low-confidence warning line still had a broken Streamlit icon encoding. To keep the app stable, that branch is temporarily guarded off until the icon line is cleaned up properly.
+
+## 2026-05-06 - Specialist Routing Bug Fix
+
+### Root cause
+
+- `FINETUNED_MODEL_DIR` in `app.py` had been set to the remote string:
+  - `platynator/clip-mughal-model`
+- But the specialist loader logic expects a local directory containing:
+  - `config.json`
+  - `model.safetensors`
+  - `training_log.json`
+- Because of that mismatch:
+  - `resolve_model_status()` could not find `config.json`
+  - the app marked itself as base CLIP only
+  - `load_clip()` returned an empty `SpecialistBundle`
+  - `refine_with_specialist()` immediately returned the zero-shot result for every image
+
+### Fix applied
+
+- Changed `FINETUNED_MODEL_DIR` to the local checkpoint path rooted at the repo:
+  - `os.path.join(os.path.dirname(__file__), "clip_mughal_finetuned")`
+- This makes the path stable in both:
+  - PowerShell
+  - WSL
+
+### Result
+
+- Clustered classes can now actually reach the second-stage fine-tuned path.
+- The earlier zero-shot-first specialist gating logic was correct in structure; it was just never receiving a non-empty specialist bundle because the model path was wrong.

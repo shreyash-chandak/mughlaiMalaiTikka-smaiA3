@@ -148,3 +148,17 @@ Training script: train.py (created in Session 2)
 
 **Files modified:** `app.py`, `CONTEXT.md`, `REPORT_WORKLOG.md`
 **Known issues / TODO:** App is feature-complete for the assignment spec. Remaining polish: test with non-monument images to verify OOD rejection at the new specialist threshold.
+
+## 2026-05-06 - Zero-Shot First, Cluster-Gated Specialist Flow
+
+**What changed:** Reworked the active inference path in `app.py` so the first-stage prediction is now a true base CLIP zero-shot pass across all 15 monument prompts. The fine-tuned checkpoint is only engaged after that first pass when the top class belongs to one of the defined specialist clusters.
+**Files modified:** `app.py`, `CONTEXT.md`, `REPORT_WORKLOG.md`
+**Key decisions:** Removed specialist reranking from the default `predict()` path by making it opt-in, and changed the specialist bundle to hold one prompt bank per cluster instead of one shared specialist bank. The specialist stage now loads from the local `./clip_mughal_finetuned/` checkpoint, filters clusters to the classes actually present in its training log, and refines only the matching cluster for the zero-shot top class.
+**Known issues / TODO:** The current low-confidence warning block in `app.py` still contains a bad icon encoding line, so the branch is temporarily disabled by guarding it off. Also, the current checkpoint log still covers only a subset of classes, so classes absent from that checkpoint will continue to use the zero-shot result until the specialist model is retrained.
+
+## 2026-05-06 - Specialist Routing Bug Fix
+
+**What changed:** Fixed a path regression in `app.py` where `FINETUNED_MODEL_DIR` had been pointed at the Hugging Face repo id string instead of the local `clip_mughal_finetuned/` directory. This caused `resolve_model_status()` to miss `config.json`, report the app as base-only, and return an empty specialist bundle, so clustered examples never reached the fine-tuned stage.
+**Files modified:** `app.py`, `CONTEXT.md`, `REPORT_WORKLOG.md`
+**Key decisions:** Replaced the relative/remote string with an absolute local path derived from `os.path.dirname(__file__)` so the app resolves the checkpoint correctly in both PowerShell and WSL.
+**Known issues / TODO:** After this fix, the cluster-gated specialist flow depends on the contents of the local `clip_mughal_finetuned/training_log.json`; classes absent from that checkpoint still fall back to zero-shot.
