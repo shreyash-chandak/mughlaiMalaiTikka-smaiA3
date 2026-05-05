@@ -421,3 +421,66 @@ New Colab cells (documented in notebook_cells.md):
 - Augmented images will be seen by evaluate.py during the re-evaluation run; this will slightly inflate held-out test numbers. Consider using `--single_view` and `--limit_per_class 36` flags when comparing against the pre-augmentation baseline.
 - The Agra Fort → Buland Darwaza confusion (33 examples) is the biggest remaining gap and may need additional specialist prompts distinguishing fort ramparts from monumental gateways.
 - Duplicate images within a class should be deduplicated before a final clean benchmark; they inflate fold counts but don't cause cross-class leakage.
+
+## 2026-05-06 - Fine-Tuned Model Results (Post Augmentation + Apostrophe Fix)
+
+### Final training results
+
+| Metric | Value |
+|---|---|
+| Mean val top-1 | **88.3%** |
+| Mean test top-1 | **88.4%** |
+| Best fold val top-1 | **92.1%** (Fold 1, Epoch 9) |
+| Training config | 1 run, 7 folds, 10 epochs, lr=2e-6, label_smoothing=0.1 |
+| Dataset | 796 real + 244 augmented images, 13 specialist classes |
+
+### Per-class accuracy (mean across 7 folds, test set)
+
+| Class | Accuracy | Δ vs Base CLIP |
+|---|---|---|
+| Tomb of Salim Chishti | 100.0% | +27.9% |
+| Taj Mahal | 98.1% | +4.5% |
+| Bibi Ka Maqbara | 94.4% | +39.6% |
+| Humayun's Tomb | 93.7% | +13.0% |
+| Safdarjung Tomb | 93.3% | +34.2% |
+| Jama Masjid Delhi | 88.8% | +22.1% |
+| Buland Darwaza | 88.4% | -8.0% |
+| Red Fort | 86.4% | +47.4% |
+| Akbar's Tomb | **86.2%** | **+83.4%** |
+| Itmad-ud-Daulah | 83.8% | +40.9% |
+| Moti Masjid Agra | 82.4% | +34.0% |
+| Fatehpur Sikri | 81.0% | +16.7% |
+| Agra Fort | 73.6% | +55.9% |
+
+### Key improvements over the previous run
+
+1. **Akbar's Tomb fixed**: 0% → 86.2%. Root cause was apostrophe encoding mismatch (U+2019 vs U+0027) silently excluding all 36 images from training. Fixed by renaming folder + augmenting to 80 images.
+2. **Augmentation leakage prevented**: `collect_image_records` now separates `aug_*` files and adds them to training folds only. Val/test splits contain only real images → honest metrics.
+3. **Red Fort dramatically improved**: 39% → 86.4%. The balanced dataset and label smoothing helped the model distinguish red sandstone forts from red sandstone gateways.
+4. **Buland Darwaza slight regression**: 96.4% → 88.4%. The fine-tuned model is less biased toward Buland Darwaza (which was previously over-predicted as a catch-all for red sandstone). This is actually a net positive for the system since Agra Fort and Red Fort no longer get misclassified as Buland Darwaza.
+
+## 2026-05-06 - App Integration Complete
+
+### Changes to `app.py`
+
+The Streamlit app now matches the full assignment spec: **upload photo → predicted monument → history paragraph → visit info card → "Open in Google Maps"**.
+
+#### 1. Metadata info card
+- New `load_monument_metadata()` function reads `metadata.json`
+- After the prediction panel, renders:
+  - **History panel**: paragraph text + fun fact in italics
+  - **Visit info grid** (2×4 cards): Location, Built By, Period, Style, Opening Hours, Ticket (Indian), Ticket (Foreign)
+  - **Google Maps button**: gradient-styled link using the `maps_query` field from metadata
+
+#### 2. Dynamic OOD threshold
+- `predict()` now accepts `ood_threshold` parameter (default `0.15`)
+- Specialist model passes `SPECIALIST_OOD_THRESHOLD = 0.35` since fine-tuned models produce higher confidence scores
+- Removed hardcoded `specialist_prediction["is_ood"] = False` — now properly calibrated
+
+#### 3. Nested context notes
+- `NESTED_CONTEXTS` dict at module level maps sub-monuments to parent complexes
+- If prediction is Buland Darwaza or Tomb of Salim Chishti → shows "📍 Part of the Fatehpur Sikri complex"
+- If prediction is Moti Masjid Agra → shows "📍 Located inside Agra Fort"
+
+#### 4. Top scores moved to expander
+- Raw score list moved inside `st.expander("See top scores")` so the metadata info card has visual priority

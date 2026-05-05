@@ -24,7 +24,16 @@ except ModuleNotFoundError:
 MODEL_NAME = "openai/clip-vit-base-patch32"
 FINETUNED_MODEL_DIR = "clip_mughal_finetuned"
 DATA_DIR = "data"
+METADATA_PATH = os.path.join(os.path.dirname(__file__), "metadata.json")
 OOD_THRESHOLD = 0.15  # Random chance is about 6.7% for 15 classes; 15% is a safer boundary between noise and a plausible match.
+SPECIALIST_OOD_THRESHOLD = 0.35  # Fine-tuned models are more confident; raise threshold accordingly.
+
+# Nested context: sub-monuments that are physically inside a larger complex
+NESTED_CONTEXTS: dict[str, str] = {
+    "Buland Darwaza": "Part of the Fatehpur Sikri complex",
+    "Tomb of Salim Chishti": "Part of the Fatehpur Sikri complex",
+    "Moti Masjid Agra": "Located inside Agra Fort",
+}
 SPECIALIST_GROUPS: dict[str, list[str]] = {
     "marble_and_mosque_cluster": [
         "Taj Mahal",
@@ -1294,6 +1303,7 @@ def predict(
     processor: CLIPProcessor,
     bank: PromptBank,
     device: torch.device,
+    ood_threshold: float = OOD_THRESHOLD,
 ) -> dict[str, Any]:
     """Predict the most likely monument class and flag out-of-domain inputs.
 
@@ -1303,6 +1313,7 @@ def predict(
         processor: Matching CLIP processor.
         bank: Prompt bank containing cached text features.
         device: Torch device used for inference.
+        ood_threshold: Minimum confidence required to be considered in-domain.
 
     Returns:
         dict[str, Any]: Ranked results, confidence metadata, and an OOD flag.
@@ -1348,7 +1359,7 @@ def predict(
     top_margin = results[0]["score"] - results[1]["score"] if len(results) > 1 else results[0]["score"]
     family_idx = torch.argmax(family_probs).item()
     top_prob = results[0]["probability"]
-    is_ood = top_prob < OOD_THRESHOLD
+    is_ood = top_prob < ood_threshold
     return {
         "results": results,
         "family_prediction": bank.family_names[family_idx],
@@ -1394,9 +1405,8 @@ def refine_with_specialist(
         processor=specialist_bundle.processor,
         bank=specialist_bundle.bank,
         device=device,
+        ood_threshold=SPECIALIST_OOD_THRESHOLD,
     )
-
-    specialist_prediction["is_ood"] = False
     specialist_prediction["results"].extend(
         result
         for result in zero_shot_prediction["results"]
@@ -1562,6 +1572,18 @@ def render_ood_panel(prediction: dict[str, Any]) -> None:
             )
 
 
+def load_monument_metadata() -> dict[str, Any]:
+    """Load monument metadata from metadata.json.
+
+    Returns:
+        dict[str, Any]: Metadata keyed by monument name, or empty dict if file is missing.
+    """
+    if os.path.isfile(METADATA_PATH):
+        with open(METADATA_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
 def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
     """Render the standard prediction panel for in-domain monument images.
 
@@ -1575,6 +1597,10 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
     conf_band = confidence_band(top_result["probability"], prediction["top_margin"])
     runner_up = prediction["results"][1] if len(prediction["results"]) > 1 else top_result
 
+    # Nested context sub-note for sub-monuments
+    nested_note = NESTED_CONTEXTS.get(monument_name, "")
+    nested_html = f'<div style="font-size: 0.88rem; color: var(--muted); margin-top: 0.15rem; font-style: italic;">📍 {nested_note}</div>' if nested_note else ""
+
     st.image(image, use_container_width=True)
 
     st.markdown(
@@ -1582,6 +1608,7 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
         <div class="panel">
             <div class="section-label">Prediction</div>
             <h2 class="result-title serif">{monument_name}</h2>
+            {nested_html}
             <div class="result-subtitle">Runner-up: {runner_up["name"]}</div>
             <div class="signal-strip">
                 <div class="signal-card">
@@ -1618,20 +1645,100 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
             icon="⚠️",
         )
 
-    st.markdown('<div class="section-label" style="margin-top:1rem;">Top Scores</div>', unsafe_allow_html=True)
-    for candidate in prediction["results"][:5]:
+    # ── Monument info card from metadata.json ──────────────────────────────
+    metadata = load_monument_metadata()
+    info = metadata.get(monument_name)
+    if info:
+        maps_url = f"https://www.google.com/maps/search/{info.get('maps_query', monument_name.replace(' ', '+'))}"
+        history_text = info.get("history", "")
+        fun_fact = info.get("fun_fact", "")
+        location = info.get("location", "")
+        built_by = info.get("built_by", "")
+        year = info.get("year", "")
+        style = info.get("style", "")
+        hours = info.get("opening_hours", "")
+        ticket_indian = info.get("ticket_price_indian", "")
+        ticket_foreign = info.get("ticket_price_foreign", "")
+
+        # History paragraph
+        if history_text:
+            st.markdown(
+                f"""
+                <div class="panel" style="margin-top: 1rem;">
+                    <div class="section-label">History</div>
+                    <p style="line-height: 1.7; color: var(--ink); font-size: 0.95rem; margin: 0;">{history_text}</p>
+                    {f'<p style="margin-top: 0.8rem; font-size: 0.88rem; color: var(--muted); font-style: italic;">💡 {fun_fact}</p>' if fun_fact else ''}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # Visit info card
         st.markdown(
             f"""
-            <div class="candidate-row">
-                <div>
-                    <div class="candidate-name">{candidate["name"]}</div>
-                    <div class="candidate-meta">{candidate["best_prompt"]}</div>
+            <div class="panel" style="margin-top: 1rem;">
+                <div class="section-label">Visit Information</div>
+                <div class="detail-grid">
+                    <div class="detail-card">
+                        <div class="detail-label">Location</div>
+                        <div class="detail-value">{location}</div>
+                    </div>
+                    <div class="detail-card">
+                        <div class="detail-label">Built By</div>
+                        <div class="detail-value">{built_by}</div>
+                    </div>
+                    <div class="detail-card">
+                        <div class="detail-label">Period</div>
+                        <div class="detail-value">{year}</div>
+                    </div>
+                    <div class="detail-card">
+                        <div class="detail-label">Style</div>
+                        <div class="detail-value">{style}</div>
+                    </div>
+                    <div class="detail-card">
+                        <div class="detail-label">Opening Hours</div>
+                        <div class="detail-value">{hours}</div>
+                    </div>
+                    <div class="detail-card">
+                        <div class="detail-label">Ticket (Indian)</div>
+                        <div class="detail-value">{ticket_indian}</div>
+                    </div>
+                    <div class="detail-card">
+                        <div class="detail-label">Ticket (Foreign)</div>
+                        <div class="detail-value">{ticket_foreign}</div>
+                    </div>
+                    <div class="detail-card" style="display: flex; align-items: center; justify-content: center;">
+                        <a href="{maps_url}" target="_blank" style="
+                            display: inline-flex; align-items: center; gap: 0.5rem;
+                            background: linear-gradient(135deg, var(--accent), var(--accent-3));
+                            color: white; padding: 0.65rem 1.2rem; border-radius: 12px;
+                            text-decoration: none; font-weight: 600; font-size: 0.88rem;
+                            transition: opacity 0.2s;
+                        " onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+                            📍 Open in Google Maps
+                        </a>
+                    </div>
                 </div>
-                <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+    # ── Top scores ─────────────────────────────────────────────────────────
+    with st.expander("See top scores"):
+        for candidate in prediction["results"][:5]:
+            st.markdown(
+                f"""
+                <div class="candidate-row">
+                    <div>
+                        <div class="candidate-name">{candidate["name"]}</div>
+                        <div class="candidate-meta">{candidate["best_prompt"]}</div>
+                    </div>
+                    <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def main() -> None:

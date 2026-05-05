@@ -117,3 +117,34 @@ Training script: train.py (created in Session 2)
 
 **Files modified:** `CONTEXT.md`, `REPORT_WORKLOG.md`
 **Known issues / TODO:** Need the fine-tuned evaluation results (eval_outputs/finetuned_specialist/metrics.json) to confirm improvement over base CLIP. Augmented images must be excluded from evaluation to avoid inflated test scores — the evaluate.py script currently reads all images in a folder, so either use --limit_per_class or separate augmented images into a subfolder.
+
+## 2026-05-06 - Fine-Tuned Model Results (Colab Run Complete)
+
+**What changed:** Completed training on balanced dataset (offline augmentation to 80 images/class, apostrophe fix applied). Model checkpoint extracted and placed in `clip_mughal_finetuned/`.
+
+**Results:**
+- Mean validation top-1: **88.3%** (up from 66.76% base CLIP)
+- Mean test top-1: **88.4%**
+- Best single fold val top-1: **92.1%** (Fold 1, Epoch 9)
+- All 13 specialist classes now functional including Akbar's Tomb (86.2%, up from 0%)
+- Tomb of Salim Chishti: 100% (previously 72%)
+- Taj Mahal: 98.1% (previously 93.6%)
+- Agra Fort: 73.6% (previously 17.7%) — still weakest class but dramatically improved
+
+**Key training details:** 1 run, 7 folds, 10 epochs per fold, lr=2e-6, label_smoothing=0.1, augmented images in training only (val/test clean).
+
+**Files modified:** `train.py` (augmentation leakage fix, lr bump, label smoothing)
+**Known issues / TODO:** Agra Fort remains the weakest class (73.6%). Consider adding more distinctive prompts for fort ramparts vs gateways.
+
+## 2026-05-06 - App Integration: Metadata Info Card, Dynamic OOD, Nested Contexts
+
+**What changed:** Completed the Streamlit app to match the full spec: upload photo → predicted monument → history paragraph → visit info card → "Open in Google Maps".
+
+**Changes to `app.py`:**
+1. **Metadata info card** — `load_monument_metadata()` reads `metadata.json` and renders: history paragraph with fun fact, 8-card visit info grid (location, built by, period, style, hours, ticket Indian, ticket foreign, Google Maps button).
+2. **Dynamic OOD threshold** — `predict()` now accepts `ood_threshold` parameter. Base model uses 0.15, specialist uses 0.35 (`SPECIALIST_OOD_THRESHOLD`) since the fine-tuned model outputs higher confidence values.
+3. **Nested context notes** — `NESTED_CONTEXTS` dict maps sub-monuments to their parent complex. Buland Darwaza and Tomb of Salim Chishti show "Part of the Fatehpur Sikri complex"; Moti Masjid Agra shows "Located inside Agra Fort".
+4. **Top scores moved to expander** — Raw score list is now inside a collapsible `st.expander("See top scores")` so the info card takes visual priority.
+
+**Files modified:** `app.py`, `CONTEXT.md`, `REPORT_WORKLOG.md`
+**Known issues / TODO:** App is feature-complete for the assignment spec. Remaining polish: test with non-monument images to verify OOD rejection at the new specialist threshold.
