@@ -1,337 +1,258 @@
-"""
-T12.4 — Mughal Architecture Identifier
-SMAI Assignment 3 | IIIT Hyderabad
-
-Zero-shot classification using CLIP (openai/clip-vit-base-patch32)
-"""
+import json
+import os
+from dataclasses import dataclass
+from typing import Any
 
 import streamlit as st
 import torch
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel
-import json
-import os
-import requests
-from io import BytesIO
+from PIL import Image, ImageEnhance, ImageOps
+from streamlit_paste_button import paste_image_button
+from transformers import CLIPModel, CLIPProcessor
 
-# ─── Page Configuration ─────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Mughal Monument Identifier",
-    page_icon="🕌",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
 
-# ─── Custom CSS ──────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=Josefin+Sans:wght@300;400;600&display=swap');
+MODEL_NAME = "openai/clip-vit-base-patch32"
+FINETUNED_MODEL_DIR = "clip_mughal_finetuned"
+OOD_THRESHOLD = 0.15  # Random chance is about 6.7% for 15 classes; 15% is a safer boundary between noise and a plausible match.
 
-:root {
-    --ivory:    #f5f0e8;
-    --gold:     #c9a84c;
-    --gold-lt:  #e8d49a;
-    --maroon:   #6b1f24;
-    --stone:    #8c7b6b;
-    --dark:     #1a1410;
-    --marble:   #ece9e0;
-}
 
-html, body, [data-testid="stApp"] {
-    background-color: var(--ivory);
-    color: var(--dark);
-}
-
-/* ── Hide Streamlit chrome ── */
-#MainMenu, footer, header { visibility: hidden; }
-
-/* ── Typography ── */
-h1, h2, h3, .monument-name {
-    font-family: 'Cormorant Garamond', serif;
-}
-p, li, div, label, span, button {
-    font-family: 'Josefin Sans', sans-serif;
-}
-
-/* ── Hero banner ── */
-.hero-banner {
-    background: linear-gradient(135deg, #1a1410 0%, #3d2b1a 50%, #6b1f24 100%);
-    border-radius: 2px;
-    padding: 3rem 2.5rem 2.5rem;
-    margin-bottom: 2rem;
-    position: relative;
-    overflow: hidden;
-}
-.hero-banner::before {
-    content: '۞';
-    position: absolute;
-    font-size: 280px;
-    color: rgba(201,168,76,0.07);
-    top: -60px; right: -40px;
-    line-height: 1;
-}
-.hero-title {
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 3.2rem;
-    font-weight: 300;
-    color: var(--gold-lt);
-    letter-spacing: 0.04em;
-    margin: 0 0 0.3rem;
-    line-height: 1.1;
-}
-.hero-sub {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.78rem;
-    color: rgba(232,212,154,0.6);
-    letter-spacing: 0.25em;
-    text-transform: uppercase;
-    margin: 0;
-}
-.hero-divider {
-    width: 60px;
-    height: 1px;
-    background: var(--gold);
-    margin: 1rem 0;
-    opacity: 0.7;
-}
-
-/* ── Upload zone ── */
-[data-testid="stFileUploader"] {
-    background: var(--marble);
-    border: 1.5px dashed var(--gold);
-    border-radius: 2px;
-    padding: 1.5rem;
-}
-[data-testid="stFileUploader"] label {
-    font-family: 'Josefin Sans', sans-serif !important;
-    font-size: 0.82rem !important;
-    letter-spacing: 0.12em !important;
-    color: var(--stone) !important;
-}
-
-/* ── Prediction card ── */
-.pred-card {
-    background: white;
-    border-top: 3px solid var(--gold);
-    padding: 1.8rem;
-    margin-bottom: 1rem;
-    box-shadow: 0 4px 20px rgba(26,20,16,0.08);
-}
-.pred-rank {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.65rem;
-    letter-spacing: 0.3em;
-    text-transform: uppercase;
-    color: var(--stone);
-    margin-bottom: 0.3rem;
-}
-.pred-name {
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 2rem;
-    font-weight: 400;
-    color: var(--maroon);
-    margin: 0 0 0.15rem;
-    line-height: 1;
-}
-.pred-location {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.75rem;
-    color: var(--stone);
-    letter-spacing: 0.12em;
-    margin-bottom: 1rem;
-}
-.confidence-label {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.7rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    color: var(--stone);
-    margin-bottom: 0.3rem;
-}
-
-/* ── Info sections ── */
-.info-section {
-    background: var(--marble);
-    border-left: 3px solid var(--gold);
-    padding: 1.2rem 1.4rem;
-    margin: 0.8rem 0;
-    font-size: 0.85rem;
-    line-height: 1.7;
-    color: #3a2e26;
-}
-.info-tag {
-    display: inline-block;
-    background: var(--maroon);
-    color: var(--gold-lt);
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.6rem;
-    letter-spacing: 0.25em;
-    text-transform: uppercase;
-    padding: 0.2rem 0.6rem;
-    margin-bottom: 0.6rem;
-}
-.visit-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.8rem;
-    margin-top: 0.5rem;
-}
-.visit-item {
-    background: white;
-    padding: 0.8rem 1rem;
-    border-bottom: 2px solid var(--gold-lt);
-}
-.visit-label {
-    font-size: 0.6rem;
-    letter-spacing: 0.25em;
-    text-transform: uppercase;
-    color: var(--stone);
-    font-family: 'Josefin Sans', sans-serif;
-}
-.visit-value {
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 1rem;
-    color: var(--dark);
-    line-height: 1.3;
-}
-
-/* ── Fun fact callout ── */
-.fun-fact {
-    background: linear-gradient(135deg, #6b1f24 0%, #3d2b1a 100%);
-    color: var(--gold-lt);
-    padding: 1.2rem 1.4rem;
-    margin-top: 0.8rem;
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 1.05rem;
-    font-style: italic;
-    line-height: 1.6;
-}
-.fun-fact-label {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.6rem;
-    letter-spacing: 0.3em;
-    text-transform: uppercase;
-    color: var(--gold);
-    margin-bottom: 0.4rem;
-    font-style: normal;
-}
-
-/* ── Other predictions ── */
-.other-card {
-    background: white;
-    border-left: 2px solid var(--gold-lt);
-    padding: 0.8rem 1rem;
-    margin-bottom: 0.5rem;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.other-name {
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 1rem;
-    color: var(--dark);
-}
-.other-pct {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.75rem;
-    color: var(--stone);
+MONUMENT_PROFILES: dict[str, dict[str, Any]] = {
+    "Taj Mahal": {
+        "aliases": ["Taj Mahal"],
+        "family": "mausoleum",
+        "place": "Agra, Uttar Pradesh, India",
+        "material": "white marble",
+        "style": "Mughal mausoleum",
+        "signatures": [
+            "a large central onion dome",
+            "four tall minarets",
+            "a reflecting pool",
+            "a perfectly symmetrical garden axis",
+        ],
+    },
+    "Humayun's Tomb": {
+        "aliases": ["Humayun's Tomb"],
+        "family": "mausoleum",
+        "place": "New Delhi, India",
+        "material": "red sandstone with white marble",
+        "style": "garden tomb",
+        "signatures": [
+            "a high plinth",
+            "a large white dome",
+            "charbagh gardens",
+            "arched red sandstone facades",
+        ],
+    },
+    "Red Fort": {
+        "aliases": ["Red Fort", "Lal Qila"],
+        "family": "fort",
+        "place": "Old Delhi, India",
+        "material": "red sandstone",
+        "style": "fortress-palace",
+        "signatures": [
+            "massive fortified walls",
+            "battlements",
+            "the Lahori Gate",
+            "broad ceremonial facades",
+        ],
+    },
+    "Agra Fort": {
+        "aliases": ["Agra Fort"],
+        "family": "fort",
+        "place": "Agra, Uttar Pradesh, India",
+        "material": "red sandstone with marble palaces",
+        "style": "riverfront fort",
+        "signatures": [
+            "thick ramparts",
+            "fortified gateways",
+            "curving red walls",
+            "palace courtyards inside the fort",
+        ],
+    },
+    "Fatehpur Sikri": {
+        "aliases": ["Fatehpur Sikri"],
+        "family": "complex",
+        "place": "Agra district, Uttar Pradesh, India",
+        "material": "red sandstone",
+        "style": "imperial city complex",
+        "signatures": [
+            "Buland Darwaza",
+            "vast courtyards",
+            "ornate pavilions",
+            "a historic Mughal city layout",
+        ],
+    },
+    "Itmad-ud-Daulah": {
+        "aliases": ["Itmad-ud-Daulah", "Baby Taj", "Itimad-ud-Daulah"],
+        "family": "mausoleum",
+        "place": "Agra, Uttar Pradesh, India",
+        "material": "white marble with pietra dura inlay",
+        "style": "ornamental tomb",
+        "signatures": [
+            "delicate inlay work",
+            "corner towers",
+            "a jewel-box scale",
+            "fine lattice screens",
+        ],
+    },
+    "Jama Masjid Delhi": {
+        "aliases": ["Jama Masjid", "Jama Masjid Delhi"],
+        "family": "mosque",
+        "place": "Old Delhi, India",
+        "material": "red sandstone and white marble",
+        "style": "congregational mosque",
+        "signatures": [
+            "three white domes",
+            "two tall minarets",
+            "a monumental staircase",
+            "a large prayer courtyard",
+        ],
+    },
+    "Qutub Minar": {
+        "aliases": ["Qutub Minar", "Qutb Minar"],
+        "family": "minaret",
+        "place": "Mehrauli, Delhi, India",
+        "material": "red sandstone and buff stone",
+        "style": "tapering minaret tower",
+        "signatures": [
+            "a fluted tapering tower",
+            "circular balconies",
+            "ornamental calligraphic bands",
+            "a very tall vertical silhouette",
+        ],
+    },
+    "Bibi Ka Maqbara": {
+        "aliases": ["Bibi Ka Maqbara"],
+        "family": "mausoleum",
+        "place": "Aurangabad, Maharashtra, India",
+        "material": "white marble over a Deccan plinth",
+        "style": "Mughal mausoleum",
+        "signatures": [
+            "a central white dome",
+            "four corner minarets",
+            "a long axial garden",
+            "a Taj Mahal-like profile",
+        ],
+    },
+    "Akbar's Tomb": {
+        "aliases": ["Akbar's Tomb", "Akbar Tomb Sikandra"],
+        "family": "mausoleum",
+        "place": "Sikandra, Agra, India",
+        "material": "red sandstone with marble details",
+        "style": "multi-tiered tomb",
+        "signatures": [
+            "a grand entry gate",
+            "stacked terraces",
+            "white marble chhatris",
+            "open pavilions at the top",
+        ],
+    },
+    "Lahore Fort": {
+        "aliases": ["Lahore Fort", "Shahi Qila"],
+        "family": "fort",
+        "place": "Lahore, Pakistan",
+        "material": "red sandstone and decorated stucco",
+        "style": "fortress-palace",
+        "signatures": [
+            "fortified walls",
+            "ornate palace facades",
+            "Mughal courtyards",
+            "high ceremonial gateways",
+        ],
+    },
+    "Badshahi Mosque": {
+        "aliases": ["Badshahi Mosque"],
+        "family": "mosque",
+        "place": "Lahore, Pakistan",
+        "material": "red sandstone with white marble domes",
+        "style": "grand imperial mosque",
+        "signatures": [
+            "three large white domes",
+            "four tall corner minarets",
+            "a vast open courtyard",
+            "a long red sandstone prayer hall",
+        ],
+    },
+    "Shalimar Bagh": {
+        "aliases": ["Shalimar Bagh", "Shalimar Garden", "Shalimar Gardens"],
+        "family": "garden",
+        "place": "Srinagar, Kashmir, India",
+        "material": "stone channels and terraced greenery",
+        "style": "Mughal garden",
+        "signatures": [
+            "terraced lawns",
+            "water channels",
+            "fountains",
+            "tree-lined garden walkways",
+        ],
+    },
+    "Moti Masjid Agra": {
+        "aliases": ["Moti Masjid Agra", "Moti Masjid"],
+        "family": "mosque",
+        "place": "Agra Fort, Agra, India",
+        "material": "white marble",
+        "style": "small imperial mosque",
+        "signatures": [
+            "three white domes",
+            "clean marble facades",
+            "graceful arches",
+            "a compact prayer courtyard",
+        ],
+    },
+    "Safdarjung Tomb": {
+        "aliases": ["Safdarjung Tomb", "Safdarjung's Tomb"],
+        "family": "mausoleum",
+        "place": "New Delhi, India",
+        "material": "sandstone with marble trim",
+        "style": "late Mughal tomb",
+        "signatures": [
+            "a bulbous central dome",
+            "four corner towers",
+            "charbagh gardens",
+            "warm sandstone walls",
+        ],
+    },
 }
 
-/* ── Maps button ── */
-.maps-btn {
-    display: inline-block;
-    background: var(--gold);
-    color: var(--dark) !important;
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.72rem;
-    letter-spacing: 0.2em;
-    text-transform: uppercase;
-    text-decoration: none;
-    padding: 0.6rem 1.4rem;
-    margin-top: 1rem;
-    border: none;
-    cursor: pointer;
-    transition: all 0.2s;
-}
-.maps-btn:hover { background: var(--gold-lt); }
 
-/* ── How it works ── */
-.how-card {
-    background: white;
-    border-top: 2px solid var(--gold-lt);
-    padding: 1.2rem 1.2rem 1rem;
-    text-align: center;
-}
-.how-icon { font-size: 1.8rem; margin-bottom: 0.5rem; }
-.how-title {
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 1rem;
-    color: var(--maroon);
-    margin-bottom: 0.3rem;
-}
-.how-body {
-    font-size: 0.75rem;
-    color: var(--stone);
-    line-height: 1.5;
+FAMILY_PROMPTS: dict[str, list[str]] = {
+    "mausoleum": [
+        "a Mughal mausoleum or tomb with a dominant dome and formal garden planning",
+        "an Indo-Islamic funerary monument with charbagh symmetry and ornamental arches",
+    ],
+    "fort": [
+        "a Mughal fort or fortress with heavy walls, gateways, battlements, and palace courts",
+        "a large red sandstone defensive complex from the Mughal period",
+    ],
+    "mosque": [
+        "a Mughal mosque with domes, minarets, prayer arches, and a congregational courtyard",
+        "an imperial mosque built in red sandstone or white marble",
+    ],
+    "minaret": [
+        "a tall tapering Islamic minaret tower with balconies and carved bands",
+        "a monumental victory tower from the Delhi Sultanate or Mughal visual tradition",
+    ],
+    "garden": [
+        "a formal Mughal garden with terraces, fountains, water channels, and tree-lined paths",
+        "a heritage landscape focused on water geometry and garden planning",
+    ],
+    "complex": [
+        "a Mughal imperial city complex with gateways, courtyards, pavilions, and ceremonial spaces",
+        "a monumental heritage complex built in red sandstone with multiple architectural elements",
+    ],
 }
 
-/* ── Monument chips ── */
-.monument-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-    margin-top: 0.5rem;
-}
-.chip {
-    background: var(--marble);
-    border: 1px solid var(--gold-lt);
-    color: var(--stone);
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.65rem;
-    letter-spacing: 0.1em;
-    padding: 0.25rem 0.6rem;
+
+FAMILY_LABELS: dict[str, str] = {
+    "mausoleum": "Mausoleum / Tomb",
+    "fort": "Fort / Fortress",
+    "mosque": "Mosque",
+    "minaret": "Minaret / Tower",
+    "garden": "Garden",
+    "complex": "Complex / City",
 }
 
-/* ── Streamlit progress bar tint ── */
-[data-testid="stProgressBar"] > div > div {
-    background-color: var(--gold) !important;
-}
 
-/* ── Section headers ── */
-.section-header {
-    font-family: 'Josefin Sans', sans-serif;
-    font-size: 0.68rem;
-    letter-spacing: 0.3em;
-    text-transform: uppercase;
-    color: var(--stone);
-    border-bottom: 1px solid var(--gold-lt);
-    padding-bottom: 0.4rem;
-    margin: 1.5rem 0 0.8rem;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ─── Constants ───────────────────────────────────────────────────────────────
-MONUMENTS = [
-    "Taj Mahal",
-    "Humayun's Tomb",
-    "Red Fort",
-    "Agra Fort",
-    "Fatehpur Sikri",
-    "Itmad-ud-Daulah",
-    "Jama Masjid Delhi",
-    "Qutub Minar",
-    "Bibi Ka Maqbara",
-    "Akbar's Tomb",
-    "Lahore Fort",
-    "Badshahi Mosque",
-    "Shalimar Bagh",
-    "Moti Masjid Agra",
-    "Safdarjung Tomb",
-]
-
-# Descriptive text prompts improve CLIP accuracy
-PROMPTS = {
+BASELINE_PROMPTS: dict[str, str] = {
     "Taj Mahal": "a photograph of the Taj Mahal, a white marble Mughal mausoleum with a central dome and four minarets in Agra India",
     "Humayun's Tomb": "a photograph of Humayun's Tomb, a red sandstone Mughal mausoleum with a large central dome surrounded by gardens in Delhi India",
     "Red Fort": "a photograph of the Red Fort, a massive Mughal fortress with red sandstone walls and Lahori Gate in Old Delhi India",
@@ -349,201 +270,1183 @@ PROMPTS = {
     "Safdarjung Tomb": "a photograph of Safdarjung Tomb, a late Mughal sandstone mausoleum with a central dome and four corner towers surrounded by gardens in New Delhi",
 }
 
-# ─── Load metadata ───────────────────────────────────────────────────────────
-@st.cache_data
-def load_metadata():
+
+SPECIALIST_PROMPTS: dict[str, dict[str, list[str]]] = {
+    "white_marble_cluster": {
+        "Taj Mahal": [
+            "a huge white marble mausoleum with one dominant central dome, four free-standing minarets, and a long reflecting pool",
+            "the Taj Mahal, a very large symmetrical Mughal tomb with four corner minarets around the main building",
+        ],
+        "Bibi Ka Maqbara": [
+            "a smaller Taj-like white mausoleum with four minarets and a narrower profile",
+            "Bibi Ka Maqbara, a white-domed Mughal tomb that resembles the Taj Mahal but is smaller and less monumental",
+        ],
+        "Moti Masjid Agra": [
+            "a compact white marble mosque with three domes, repeated prayer arches, and no huge free-standing minarets",
+            "the Moti Masjid in Agra Fort, a small marble mosque with three bulbous domes and a prayer courtyard",
+        ],
+        "Itmad-ud-Daulah": [
+            "a small jewel-box marble tomb with corner towers, delicate inlay, and fine lattice work",
+            "Itmad-ud-Daulah, a compact white marble mausoleum with slender corner turrets and ornate surface details",
+        ],
+    }
+}
+
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&display=swap');
+
+:root {
+    --bg: #f7f2e8;
+    --surface: #fffaf2;
+    --surface-2: #efe4d2;
+    --ink: #1f1a14;
+    --muted: #6d6258;
+    --accent: #9b6b2f;
+    --accent-2: #c99f62;
+    --accent-3: #7e2330;
+    --line: #deceb6;
+    --success: #355f46;
+}
+
+html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+    background:
+        radial-gradient(circle at top right, rgba(201, 159, 98, 0.20), transparent 28%),
+        linear-gradient(180deg, #fbf7ef 0%, #f6efe2 100%);
+    color: var(--ink);
+}
+
+#MainMenu, footer, header {
+    visibility: hidden;
+}
+
+html, body, [class*="css"] {
+    font-family: 'Manrope', sans-serif;
+}
+
+h1, h2, h3, h4, .serif {
+    font-family: 'Cormorant Garamond', serif;
+}
+
+.block-container {
+    padding-top: 1.4rem;
+    padding-bottom: 2rem;
+    max-width: 1220px;
+}
+
+.hero-shell {
+    background: linear-gradient(135deg, rgba(20, 17, 12, 0.98), rgba(72, 38, 21, 0.95) 55%, rgba(126, 35, 48, 0.92));
+    border: 1px solid rgba(233, 206, 167, 0.18);
+    color: #f7ead1;
+    border-radius: 24px;
+    padding: 2.4rem 2.3rem;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 18px 42px rgba(36, 27, 19, 0.18);
+    margin-bottom: 1.3rem;
+}
+
+.hero-shell::after {
+    content: "MUGHAL";
+    position: absolute;
+    top: 1rem;
+    right: 1.25rem;
+    font-size: 0.8rem;
+    letter-spacing: 0.44em;
+    color: rgba(247, 234, 209, 0.22);
+}
+
+.hero-title {
+    font-size: clamp(2.5rem, 4vw, 4.3rem);
+    line-height: 0.95;
+    margin: 0;
+    font-weight: 600;
+}
+
+.hero-kicker {
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    color: rgba(247, 234, 209, 0.72);
+    margin-bottom: 0.8rem;
+}
+
+.hero-copy {
+    max-width: 720px;
+    line-height: 1.65;
+    color: rgba(247, 234, 209, 0.86);
+    margin-top: 1rem;
+    font-size: 0.98rem;
+}
+
+.hero-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.9rem;
+    margin-top: 1.4rem;
+}
+
+.hero-chip {
+    background: rgba(255, 250, 242, 0.08);
+    border: 1px solid rgba(247, 234, 209, 0.12);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+}
+
+.hero-chip-label {
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: rgba(247, 234, 209, 0.66);
+    margin-bottom: 0.3rem;
+}
+
+.hero-chip-value {
+    font-size: 0.98rem;
+    color: #fff7e8;
+}
+
+.panel {
+    background: rgba(255, 250, 242, 0.90);
+    border: 1px solid rgba(183, 155, 122, 0.24);
+    border-radius: 22px;
+    padding: 1.2rem;
+    box-shadow: 0 10px 28px rgba(43, 30, 20, 0.07);
+}
+
+.panel-tight {
+    padding: 1rem;
+}
+
+.section-label {
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-bottom: 0.85rem;
+}
+
+.model-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 999px;
+    padding: 0.45rem 0.85rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin: 0.25rem 0 1rem;
+}
+
+.model-badge-active {
+    color: var(--success);
+    background: rgba(53, 95, 70, 0.10);
+    border: 1px solid rgba(53, 95, 70, 0.18);
+}
+
+.model-badge-base {
+    color: var(--muted);
+    background: rgba(109, 98, 88, 0.10);
+    border: 1px solid rgba(109, 98, 88, 0.18);
+}
+
+.result-title {
+    margin: 0;
+    font-size: 2.5rem;
+    line-height: 1;
+    color: var(--accent-3);
+}
+
+.result-subtitle {
+    color: var(--muted);
+    margin-top: 0.35rem;
+    font-size: 0.94rem;
+}
+
+.signal-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.85rem;
+    margin-top: 1rem;
+}
+
+.signal-card {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 0.9rem 1rem;
+}
+
+.signal-label {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 0.66rem;
+    color: var(--muted);
+    margin-bottom: 0.35rem;
+}
+
+.signal-value {
+    font-size: 1.1rem;
+    color: var(--ink);
+}
+
+.soft-card {
+    background: white;
+    border: 1px solid rgba(183, 155, 122, 0.22);
+    border-radius: 18px;
+    padding: 1rem;
+}
+
+.mini-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    background: rgba(155, 107, 47, 0.10);
+    color: var(--accent);
+    padding: 0.35rem 0.65rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    margin: 0.25rem 0.35rem 0 0;
+}
+
+.detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.85rem;
+    margin-top: 0.8rem;
+}
+
+.detail-card {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 0.95rem 1rem;
+}
+
+.detail-label {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 0.64rem;
+    color: var(--muted);
+    margin-bottom: 0.35rem;
+}
+
+.detail-value {
+    font-size: 0.95rem;
+    color: var(--ink);
+    line-height: 1.55;
+}
+
+.candidate-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: center;
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 0.85rem 1rem;
+    margin-top: 0.7rem;
+}
+
+.candidate-name {
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.candidate-meta {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin-top: 0.15rem;
+}
+
+.candidate-score {
+    color: var(--accent-3);
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.empty-state {
+    min-height: 420px;
+    border: 1.5px dashed rgba(155, 107, 47, 0.35);
+    border-radius: 22px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 250, 242, 0.72);
+    text-align: center;
+    padding: 2rem;
+}
+
+.empty-state-title {
+    font-size: 2rem;
+    margin-top: 0.6rem;
+    color: var(--accent-3);
+}
+
+.empty-state-copy {
+    max-width: 380px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+
+.method-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.8rem;
+}
+
+.method-card {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 1rem;
+}
+
+.method-title {
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 0.35rem;
+}
+
+.method-copy {
+    color: var(--muted);
+    line-height: 1.55;
+    font-size: 0.88rem;
+}
+
+[data-testid="stFileUploader"] {
+    background: white;
+    border-radius: 18px;
+    border: 1.4px dashed rgba(155, 107, 47, 0.35);
+    padding: 0.65rem;
+}
+
+[data-testid="stCameraInput"] {
+    background: white;
+    border-radius: 18px;
+    border: 1px solid var(--line);
+    padding: 0.4rem;
+}
+
+[data-testid="stHorizontalBlock"] {
+    align-items: stretch;
+}
+
+[data-testid="stMetric"] {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 0.2rem 0.8rem 0.8rem;
+}
+
+[data-testid="stProgressBar"] > div > div {
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+@media (max-width: 900px) {
+    .hero-grid,
+    .signal-strip,
+    .method-row,
+    .detail-grid {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+"""
+
+
+@dataclass
+class PromptBank:
+    """Cache precomputed text features and prompt metadata for inference."""
+
+    class_names: list[str]
+    prompts_by_class: dict[str, list[str]]
+    flat_prompts: list[str]
+    class_prompt_indices: dict[str, list[int]]
+    text_features: torch.Tensor
+    family_names: list[str]
+    family_features: torch.Tensor
+    family_lookup: dict[str, str]
+    specialist_features: dict[str, dict[str, torch.Tensor]]
+
+
+@dataclass
+class ModelStatus:
+    """Describe whether inference is using the base or fine-tuned CLIP checkpoint."""
+
+    is_finetuned: bool
+    badge_text: str
+    badge_class: str
+    best_val_top1: float | None = None
+
+
+def load_metadata() -> dict[str, Any]:
+    """Load cached monument metadata from disk.
+
+    Returns:
+        dict[str, Any]: Metadata keyed by monument name.
+    """
+
     meta_path = os.path.join(os.path.dirname(__file__), "metadata.json")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    with open(meta_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
-# ─── Load CLIP model ─────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def load_clip():
-    with st.spinner("Loading CLIP model (first run only)…"):
-        model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        model.eval()
-    return model, processor
 
-# ─── Inference ───────────────────────────────────────────────────────────────
-@torch.no_grad()
-def predict(image: Image.Image, model, processor):
-    texts = [PROMPTS[m] for m in MONUMENTS]
-    inputs = processor(
-        text=texts,
-        images=image,
-        return_tensors="pt",
-        padding=True,
+def build_class_prompts(metadata: dict[str, Any]) -> dict[str, list[str]]:
+    """Build the prompt ensemble used by both inference and fine-tuning validation.
+
+    Args:
+        metadata: Monument metadata loaded from ``metadata.json``.
+
+    Returns:
+        dict[str, list[str]]: Prompt ensemble keyed by monument name.
+    """
+
+    prompts_by_class: dict[str, list[str]] = {}
+
+    for monument, profile in MONUMENT_PROFILES.items():
+        monument_meta = metadata.get(monument, {})
+        place = profile["place"]
+        style = monument_meta.get("style", profile["style"])
+        aliases = profile["aliases"]
+        material = profile["material"]
+        signatures = profile["signatures"]
+        family_label = FAMILY_LABELS[profile["family"]].lower()
+        alias_phrase = ", also known as ".join(aliases[:2]) if len(aliases) > 1 else aliases[0]
+
+        prompt_candidates = [
+            f"a travel photograph of {aliases[0]}, a Mughal {family_label} in {place}",
+            f"an architecture photo of {alias_phrase} with {signatures[0]}, {signatures[1]}, and {material}",
+            f"a heritage site photograph of {aliases[0]} in {place}, known for {signatures[2]} and {signatures[3]}",
+            f"a wide outdoor view of {aliases[0]}, a {style} built in {material}",
+            f"a tourist photo of {aliases[0]} showing {signatures[0]} and {signatures[2]}",
+            f"a daylight photograph of {aliases[0]} with distinctive Mughal details such as {signatures[1]} and {signatures[3]}",
+        ]
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for prompt in prompt_candidates:
+            clean_prompt = " ".join(prompt.split())
+            if clean_prompt not in seen:
+                deduped.append(clean_prompt)
+                seen.add(clean_prompt)
+        prompts_by_class[monument] = deduped
+
+    return prompts_by_class
+
+
+PROMPT_ENSEMBLES = build_class_prompts(load_metadata())
+
+
+def build_family_features(model: CLIPModel, processor: CLIPProcessor, device: torch.device) -> tuple[list[str], torch.Tensor]:
+    """Encode coarse monument-family prompts for lightweight reranking.
+
+    Args:
+        model: Loaded CLIP model.
+        processor: Matching CLIP processor.
+        device: Torch device for feature extraction.
+
+    Returns:
+        tuple[list[str], torch.Tensor]: Family names and normalized text features.
+    """
+
+    family_names = list(FAMILY_PROMPTS.keys())
+    family_prompt_texts = [" ".join(prompts) for prompts in FAMILY_PROMPTS.values()]
+    encoded = processor(text=family_prompt_texts, return_tensors="pt", padding=True, truncation=True)
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+    with torch.no_grad():
+        features = extract_text_features(model, encoded)
+    return family_names, normalize(features)
+
+
+def build_specialist_features(
+    model: CLIPModel,
+    processor: CLIPProcessor,
+    device: torch.device,
+) -> dict[str, dict[str, torch.Tensor]]:
+    """Encode specialist prompts for visually confusing monument clusters.
+
+    Args:
+        model: Loaded CLIP model.
+        processor: Matching CLIP processor.
+        device: Torch device for feature extraction.
+
+    Returns:
+        dict[str, dict[str, torch.Tensor]]: Specialist prompt features keyed by group and class.
+    """
+
+    specialist_features: dict[str, dict[str, torch.Tensor]] = {}
+
+    for group_name, group_prompts in SPECIALIST_PROMPTS.items():
+        specialist_features[group_name] = {}
+        for monument_name, prompts in group_prompts.items():
+            encoded = processor(text=prompts, return_tensors="pt", padding=True, truncation=True)
+            encoded = {key: value.to(device) for key, value in encoded.items()}
+            with torch.no_grad():
+                features = extract_text_features(model, encoded)
+            specialist_features[group_name][monument_name] = normalize(features)
+
+    return specialist_features
+
+
+def normalize(tensor: torch.Tensor) -> torch.Tensor:
+    """L2-normalize feature vectors along the last dimension.
+
+    Args:
+        tensor: Feature tensor to normalize.
+
+    Returns:
+        torch.Tensor: Normalized feature tensor.
+    """
+
+    return tensor / tensor.norm(dim=-1, keepdim=True)
+
+
+def get_device() -> torch.device:
+    """Pick CUDA when available, otherwise fall back to CPU.
+
+    Returns:
+        torch.device: Runtime device for inference or training helpers.
+    """
+
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def extract_text_features(model: CLIPModel, encoded_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Project CLIP text encoder outputs into the shared embedding space.
+
+    Args:
+        model: Loaded CLIP model.
+        encoded_inputs: Tokenized text inputs from the processor.
+
+    Returns:
+        torch.Tensor: Text embeddings in CLIP's joint feature space.
+    """
+
+    text_outputs = model.text_model(
+        input_ids=encoded_inputs["input_ids"],
+        attention_mask=encoded_inputs.get("attention_mask"),
+        position_ids=encoded_inputs.get("position_ids"),
+        return_dict=True,
     )
-    outputs = model(**inputs)
-    logits = outputs.logits_per_image[0]
-    probs = logits.softmax(dim=-1).cpu().numpy()
-
-    results = sorted(
-        zip(MONUMENTS, probs.tolist()),
-        key=lambda x: x[1],
-        reverse=True,
-    )
-    return results  # list of (name, prob)
-
-# ─── Hero ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<div class="hero-banner">
-    <div class="hero-sub">SMAI Assignment 3 · T12.4 · IIIT Hyderabad</div>
-    <div class="hero-divider"></div>
-    <div class="hero-title">Mughal Monument<br>Identifier</div>
-    <div style="margin-top:1rem; font-family:'Josefin Sans',sans-serif; font-size:0.8rem; color:rgba(232,212,154,0.55); max-width:480px; line-height:1.6;">
-        Upload a photograph of any Mughal-era monument and the app will identify it using CLIP zero-shot classification — no model training required.
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# ─── Layout ──────────────────────────────────────────────────────────────────
-meta = load_metadata()
-
-col_left, col_right = st.columns([1, 1.35], gap="large")
-
-with col_left:
-    st.markdown('<div class="section-header">Upload Monument Photo</div>', unsafe_allow_html=True)
-
-    uploaded = st.file_uploader(
-        "Drop a JPG / PNG image here",
-        type=["jpg", "jpeg", "png", "webp"],
-        help="Photograph of a Mughal monument — taken from any angle.",
-    )
-
-    # "How it works" mini-cards
-    st.markdown('<div class="section-header" style="margin-top:2rem;">How It Works</div>', unsafe_allow_html=True)
-    hw1, hw2, hw3 = st.columns(3)
-    for col, icon, title, body in [
-        (hw1, "🖼️", "Upload", "Any photo of a Mughal monument"),
-        (hw2, "🧠", "CLIP", "Zero-shot image-text similarity"),
-        (hw3, "📜", "Identify", "Name, history & visit info"),
-    ]:
-        with col:
-            st.markdown(f"""
-            <div class="how-card">
-                <div class="how-icon">{icon}</div>
-                <div class="how-title">{title}</div>
-                <div class="how-body">{body}</div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-header" style="margin-top:2rem;">Supported Monuments</div>', unsafe_allow_html=True)
-    chips_html = '<div class="monument-chips">'
-    for m in MONUMENTS:
-        chips_html += f'<span class="chip">{m}</span>'
-    chips_html += '</div>'
-    st.markdown(chips_html, unsafe_allow_html=True)
+    pooled_output = text_outputs.pooler_output
+    return model.text_projection(pooled_output)
 
 
-with col_right:
-    if uploaded is None:
-        st.markdown("""
-        <div style="height:380px; display:flex; flex-direction:column; align-items:center;
-                    justify-content:center; background:white; border:1px solid #e8d49a;">
-            <div style="font-size:3rem; margin-bottom:1rem; opacity:0.3;">🕌</div>
-            <div style="font-family:'Cormorant Garamond',serif; font-size:1.4rem; color:#8c7b6b; opacity:0.6;">
-                Awaiting photograph…
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+def extract_image_features(model: CLIPModel, pixel_values: torch.Tensor) -> torch.Tensor:
+    """Project CLIP vision encoder outputs into the shared embedding space.
+
+    Args:
+        model: Loaded CLIP model.
+        pixel_values: Batched image tensor ready for the vision tower.
+
+    Returns:
+        torch.Tensor: Image embeddings in CLIP's joint feature space.
+    """
+
+    vision_outputs = model.vision_model(pixel_values=pixel_values, return_dict=True)
+    pooled_output = vision_outputs.pooler_output
+    return model.visual_projection(pooled_output)
+
+
+def calibrate_probabilities(class_scores: torch.Tensor) -> torch.Tensor:
+    """Convert raw class scores into a sharper calibrated probability distribution.
+
+    Args:
+        class_scores: Raw class compatibility scores.
+
+    Returns:
+        torch.Tensor: Softmax probabilities after scale calibration.
+    """
+
+    centered_scores = class_scores - class_scores.mean()
+    score_scale = torch.clamp(class_scores.std(), min=0.015)
+    calibrated_logits = centered_scores / score_scale * 1.8
+    return torch.softmax(calibrated_logits, dim=0)
+
+
+def specialist_adjustment(
+    image_features: torch.Tensor,
+    candidate_scores: dict[str, float],
+    bank: PromptBank,
+) -> dict[str, float]:
+    """Apply specialist reranking for monuments that are visually easy to confuse.
+
+    Args:
+        image_features: Normalized image embeddings for the current input views.
+        candidate_scores: Base class scores before specialist reranking.
+        bank: Prompt bank containing specialist prompt features.
+
+    Returns:
+        dict[str, float]: Adjusted class scores.
+    """
+
+    adjusted_scores = candidate_scores.copy()
+    top_candidates = sorted(candidate_scores.items(), key=lambda item: item[1], reverse=True)[:4]
+    top_names = {name for name, _ in top_candidates}
+    white_cluster_names = set(SPECIALIST_PROMPTS["white_marble_cluster"].keys())
+
+    if len(top_names & white_cluster_names) < 2:
+        return adjusted_scores
+
+    group_features = bank.specialist_features["white_marble_cluster"]
+    group_bonus: dict[str, float] = {}
+
+    for monument_name, features in group_features.items():
+        specialist_scores = image_features @ features.T
+        mean_score = specialist_scores.mean().item()
+        max_score = specialist_scores.max().item()
+        group_bonus[monument_name] = 0.65 * mean_score + 0.35 * max_score
+
+    for monument_name, bonus in group_bonus.items():
+        if monument_name in adjusted_scores:
+            adjusted_scores[monument_name] += 0.45 * bonus
+
+    return adjusted_scores
+
+
+def load_training_log(model_dir: str) -> dict[str, Any]:
+    """Read training metadata for a fine-tuned checkpoint when available.
+
+    Args:
+        model_dir: Directory that may contain ``training_log.json``.
+
+    Returns:
+        dict[str, Any]: Parsed training log, or an empty dict if unavailable.
+    """
+
+    log_path = os.path.join(model_dir, "training_log.json")
+    if not os.path.exists(log_path):
+        return {}
+
+    with open(log_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def resolve_model_status(model_dir: str) -> ModelStatus:
+    """Determine whether the app should present a base or fine-tuned model badge.
+
+    Args:
+        model_dir: Candidate fine-tuned checkpoint directory.
+
+    Returns:
+        ModelStatus: Badge metadata for the UI.
+    """
+
+    config_path = os.path.join(model_dir, "config.json")
+    if not os.path.exists(config_path):
+        return ModelStatus(
+            is_finetuned=False,
+            badge_text="◦ Base CLIP model (zero-shot)",
+            badge_class="model-badge-base",
+        )
+
+    training_log = load_training_log(model_dir)
+    best_val_top1 = training_log.get("best_val_top1")
+    if isinstance(best_val_top1, (float, int)):
+        badge_text = f"✦ Fine-tuned model active · val top-1 {best_val_top1 * 100:.1f}%"
     else:
-        image = Image.open(uploaded).convert("RGB")
+        badge_text = "✦ Fine-tuned model active"
 
-        # Show image
-        st.image(image, use_container_width=True)
+    return ModelStatus(
+        is_finetuned=True,
+        badge_text=badge_text,
+        badge_class="model-badge-active",
+        best_val_top1=float(best_val_top1) if isinstance(best_val_top1, (float, int)) else None,
+    )
 
-        # Load model & predict
-        model, processor = load_clip()
 
-        with st.spinner("Analysing monument…"):
-            results = predict(image, model, processor)
+@st.cache_resource(show_spinner=False)
+def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, torch.device, ModelStatus]:
+    """Load the active CLIP model, processor, prompt bank, and model-status badge.
 
-        top_name, top_prob = results[0]
-        info = meta.get(top_name, {})
+    Returns:
+        tuple[CLIPModel, CLIPProcessor, PromptBank, torch.device, ModelStatus]:
+            Active model bundle plus UI badge metadata.
+    """
 
-        # ── Top prediction card ──
-        st.markdown(f"""
-        <div class="pred-card">
-            <div class="pred-rank">Top Prediction</div>
-            <div class="pred-name">{top_name}</div>
-            <div class="pred-location">📍 {info.get('location', 'Mughal Empire')}</div>
-            <div class="confidence-label">Confidence Score</div>
+    device = get_device()
+    model_status = resolve_model_status(FINETUNED_MODEL_DIR)
+    model_source = FINETUNED_MODEL_DIR if model_status.is_finetuned else MODEL_NAME
+    model = CLIPModel.from_pretrained(model_source).to(device)
+    processor = CLIPProcessor.from_pretrained(model_source)
+    model.eval()
+
+    class_names = list(PROMPT_ENSEMBLES.keys())
+    flat_prompts: list[str] = []
+    class_prompt_indices: dict[str, list[int]] = {}
+
+    for class_name in class_names:
+        indices: list[int] = []
+        for prompt in PROMPT_ENSEMBLES[class_name]:
+            indices.append(len(flat_prompts))
+            flat_prompts.append(prompt)
+        class_prompt_indices[class_name] = indices
+
+    encoded = processor(text=flat_prompts, return_tensors="pt", padding=True, truncation=True)
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+    with torch.no_grad():
+        text_features = extract_text_features(model, encoded)
+    text_features = normalize(text_features)
+
+    family_names, family_features = build_family_features(model, processor, device)
+    specialist_features = build_specialist_features(model, processor, device)
+    bank = PromptBank(
+        class_names=class_names,
+        prompts_by_class=PROMPT_ENSEMBLES,
+        flat_prompts=flat_prompts,
+        class_prompt_indices=class_prompt_indices,
+        text_features=text_features,
+        family_names=family_names,
+        family_features=family_features,
+        family_lookup={name: MONUMENT_PROFILES[name]["family"] for name in class_names},
+        specialist_features=specialist_features,
+    )
+    return model, processor, bank, device, model_status
+
+
+def center_crop(image: Image.Image, crop_ratio: float) -> Image.Image:
+    """Crop the center region of an image using a relative crop ratio.
+
+    Args:
+        image: Input PIL image.
+        crop_ratio: Fraction of width and height to retain.
+
+    Returns:
+        Image.Image: Center-cropped image.
+    """
+
+    width, height = image.size
+    crop_w = int(width * crop_ratio)
+    crop_h = int(height * crop_ratio)
+    left = max((width - crop_w) // 2, 0)
+    top = max((height - crop_h) // 2, 0)
+    return image.crop((left, top, left + crop_w, top + crop_h))
+
+
+def prepare_image_views(image: Image.Image) -> list[Image.Image]:
+    """Create multiple image views to make zero-shot inference less brittle.
+
+    Args:
+        image: Input monument image.
+
+    Returns:
+        list[Image.Image]: Augmented image views used during inference.
+    """
+
+    rgb = image.convert("RGB")
+    autocontrast = ImageOps.autocontrast(rgb)
+    contrast = ImageEnhance.Contrast(autocontrast).enhance(1.08)
+    sharpened = ImageEnhance.Sharpness(autocontrast).enhance(1.25)
+    focused = center_crop(rgb, 0.88)
+    focused = ImageOps.autocontrast(focused)
+    close_crop = center_crop(rgb, 0.72)
+    close_crop = ImageEnhance.Sharpness(ImageOps.autocontrast(close_crop)).enhance(1.2)
+    return [rgb, autocontrast, contrast, sharpened, focused, close_crop]
+
+
+def score_prompt_groups(
+    prompt_scores: torch.Tensor,
+    bank: PromptBank,
+    family_probs: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, str]]:
+    """Aggregate prompt-level scores into class-level scores.
+
+    Args:
+        prompt_scores: Similarity matrix between image views and prompt embeddings.
+        bank: Prompt bank containing prompt-to-class mappings.
+        family_probs: Coarse family probabilities used for gentle reranking.
+
+    Returns:
+        tuple[torch.Tensor, dict[str, str]]: Class scores and the best prompt per class.
+    """
+
+    class_scores: list[torch.Tensor] = []
+    best_prompts: dict[str, str] = {}
+
+    for class_name in bank.class_names:
+        indices = bank.class_prompt_indices[class_name]
+        group_scores = prompt_scores[:, indices]
+        mean_score = group_scores.mean()
+        max_position = group_scores.argmax().item()
+        max_score = group_scores.reshape(-1)[max_position]
+        family_name = bank.family_lookup[class_name]
+        family_bonus = 0.8 * family_probs[bank.family_names.index(family_name)]
+        class_score = 0.72 * mean_score + 0.28 * max_score + family_bonus
+        class_scores.append(class_score)
+
+        best_prompt_flat_index = indices[max_position % len(indices)]
+        best_prompts[class_name] = bank.flat_prompts[best_prompt_flat_index]
+
+    return torch.stack(class_scores), best_prompts
+
+
+@torch.no_grad()
+def predict(
+    image: Image.Image,
+    model: CLIPModel,
+    processor: CLIPProcessor,
+    bank: PromptBank,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Predict the most likely monument class and flag out-of-domain inputs.
+
+    Args:
+        image: Input monument image.
+        model: Active CLIP model.
+        processor: Matching CLIP processor.
+        bank: Prompt bank containing cached text features.
+        device: Torch device used for inference.
+
+    Returns:
+        dict[str, Any]: Ranked results, confidence metadata, and an OOD flag.
+    """
+
+    views = prepare_image_views(image)
+    encoded = processor(images=views, return_tensors="pt")
+    pixel_values = encoded["pixel_values"].to(device)
+
+    image_features = extract_image_features(model, pixel_values)
+    image_features = normalize(image_features)
+    prompt_scores = image_features @ bank.text_features.T
+    family_scores = image_features @ bank.family_features.T
+    family_probs = torch.softmax(family_scores.mean(dim=0) / 0.55, dim=0)
+
+    class_scores, best_prompts = score_prompt_groups(prompt_scores, bank, family_probs)
+    candidate_scores = {
+        bank.class_names[idx]: float(class_scores[idx].item())
+        for idx in range(len(bank.class_names))
+    }
+    candidate_scores = specialist_adjustment(image_features, candidate_scores, bank)
+    adjusted_class_scores = torch.tensor(
+        [candidate_scores[name] for name in bank.class_names],
+        device=device,
+        dtype=class_scores.dtype,
+    )
+    probs = calibrate_probabilities(adjusted_class_scores)
+    ranked_indices = torch.argsort(adjusted_class_scores, descending=True)
+
+    results: list[dict[str, Any]] = []
+    for idx in ranked_indices.tolist():
+        name = bank.class_names[idx]
+        results.append(
+            {
+                "name": name,
+                "probability": float(probs[idx].item()),
+                "score": float(adjusted_class_scores[idx].item()),
+                "family": bank.family_lookup[name],
+                "best_prompt": best_prompts[name],
+            }
+        )
+
+    top_margin = results[0]["score"] - results[1]["score"] if len(results) > 1 else results[0]["score"]
+    family_idx = torch.argmax(family_probs).item()
+    top_prob = results[0]["probability"]
+    is_ood = top_prob < OOD_THRESHOLD
+    return {
+        "results": results,
+        "family_prediction": bank.family_names[family_idx],
+        "family_confidence": float(family_probs[family_idx].item()),
+        "top_margin": float(top_margin),
+        "view_count": len(views),
+        "prompt_count": len(bank.flat_prompts),
+        "is_ood": is_ood,
+    }
+
+
+@torch.no_grad()
+def predict_baseline(
+    image: Image.Image,
+    model: CLIPModel,
+    processor: CLIPProcessor,
+    device: torch.device,
+) -> list[tuple[str, float]]:
+    """Run the original single-prompt baseline for quick sanity checks.
+
+    Args:
+        image: Input monument image.
+        model: Active CLIP model.
+        processor: Matching CLIP processor.
+        device: Torch device used for inference.
+
+    Returns:
+        list[tuple[str, float]]: Ranked baseline predictions.
+    """
+
+    texts = [BASELINE_PROMPTS[name] for name in MONUMENT_PROFILES]
+    encoded = processor(text=texts, images=image.convert("RGB"), return_tensors="pt", padding=True, truncation=True)
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+    outputs = model(**encoded)
+    probs = outputs.logits_per_image[0].softmax(dim=-1).detach().cpu().tolist()
+    return sorted(zip(MONUMENT_PROFILES.keys(), probs), key=lambda item: item[1], reverse=True)
+
+
+def confidence_band(probability: float, margin: float) -> str:
+    """Map numeric confidence signals into a human-readable confidence band.
+
+    Args:
+        probability: Top predicted probability.
+        margin: Score gap between the top two predictions.
+
+    Returns:
+        str: ``High``, ``Moderate``, or ``Low``.
+    """
+
+    if probability >= 0.60 and margin >= 0.20:
+        return "High"
+    if probability >= 0.35 and margin >= 0.08:
+        return "Moderate"
+    return "Low"
+
+
+def image_from_upload(uploaded_file: Any) -> Image.Image | None:
+    """Convert an uploaded file into an RGB PIL image.
+
+    Args:
+        uploaded_file: Streamlit upload object.
+
+    Returns:
+        Image.Image | None: Decoded image, or ``None`` if no file was uploaded.
+    """
+
+    if uploaded_file is None:
+        return None
+    return Image.open(uploaded_file).convert("RGB")
+
+
+def image_from_camera(camera_file: Any) -> Image.Image | None:
+    """Convert a camera capture into an RGB PIL image.
+
+    Args:
+        camera_file: Streamlit camera capture object.
+
+    Returns:
+        Image.Image | None: Decoded image, or ``None`` if no capture exists.
+    """
+
+    if camera_file is None:
+        return None
+    return Image.open(camera_file).convert("RGB")
+
+
+def image_from_clipboard() -> Image.Image | None:
+    """Read an image pasted via the clipboard widget.
+
+    Returns:
+        Image.Image | None: Clipboard image, or ``None`` if nothing has been pasted.
+    """
+
+    result = paste_image_button(
+        label="Paste screenshot from clipboard",
+        text_color="#fffaf2",
+        background_color="#9b6b2f",
+        hover_background_color="#835621",
+        key="paste_button",
+    )
+    if result.image_data is not None:
+        st.session_state["pasted_image"] = result.image_data.convert("RGB")
+    return st.session_state.get("pasted_image")
+
+
+def render_model_status_badge(model_status: ModelStatus) -> None:
+    """Render the active-model badge just below the page title.
+
+    Args:
+        model_status: Badge metadata describing the active checkpoint.
+    """
+
+    st.markdown(
+        f'<div class="model-badge {model_status.badge_class}">{model_status.badge_text}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_monument_chips() -> str:
+    """Build the supported-monuments chip list as reusable HTML.
+
+    Returns:
+        str: Chip markup for all supported monument classes.
+    """
+
+    return "".join(f'<span class="mini-tag">{name}</span>' for name in PROMPT_ENSEMBLES)
+
+
+def render_ood_panel(prediction: dict[str, Any]) -> None:
+    """Render the out-of-domain message when no monument class is convincing.
+
+    Args:
+        prediction: Prediction payload containing ranked low-confidence scores.
+    """
+
+    st.markdown(
+        f"""
+        <div class="panel" style="text-align:center;">
+            <div style="font-size:3.4rem; line-height:1;">🕌</div>
+            <h2 class="result-title serif" style="text-align:center; margin-top:0.6rem;">Not a Mughal Monument</h2>
+            <div class="result-subtitle" style="max-width:620px; margin:0.8rem auto 0;">
+                This image does not appear to match any of the 15 Mughal monuments in our database.
+                For best results, upload a clear exterior or interior photograph of one of the supported monuments.
+            </div>
+            <div style="margin-top:1rem;">{render_monument_chips()}</div>
         </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
-        st.progress(float(top_prob))
-        st.markdown(f"""<div style="font-family:'Josefin Sans',sans-serif; font-size:0.85rem; color:#6b1f24; margin-top:-0.5rem;">
-            <strong>{top_prob*100:.1f}%</strong> confidence
-        </div>""", unsafe_allow_html=True)
-
-        # ── History ──
-        st.markdown(f"""
-        <div class="info-section">
-            <div class="info-tag">History</div><br>
-            {info.get('history', 'Historical information not available.')}
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ── Visit info grid ──
-        st.markdown(f"""
-        <div style="margin:0.8rem 0 0.3rem;">
-            <div class="info-tag">Visit Information</div>
-        </div>
-        <div class="visit-grid">
-            <div class="visit-item">
-                <div class="visit-label">Built By</div>
-                <div class="visit-value">{info.get('built_by', '—')}</div>
-            </div>
-            <div class="visit-item">
-                <div class="visit-label">Year</div>
-                <div class="visit-value">{info.get('year', '—')}</div>
-            </div>
-            <div class="visit-item">
-                <div class="visit-label">Opening Hours</div>
-                <div class="visit-value">{info.get('opening_hours', '—')}</div>
-            </div>
-            <div class="visit-item">
-                <div class="visit-label">Entry (Indian / Foreign)</div>
-                <div class="visit-value">{info.get('ticket_price_indian', '—')}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ── Fun Fact ──
-        if info.get("fun_fact"):
-            st.markdown(f"""
-            <div class="fun-fact">
-                <div class="fun-fact-label">✦ Did You Know?</div>
-                {info['fun_fact']}
-            </div>
-            """, unsafe_allow_html=True)
-
-        # ── Google Maps link ──
-        maps_url = f"https://www.google.com/maps/search/?api=1&query={info.get('maps_query', top_name.replace(' ', '+'))}"
-        st.markdown(f'<a href="{maps_url}" target="_blank" class="maps-btn">🗺 Open in Google Maps</a>', unsafe_allow_html=True)
-
-        # ── Other predictions ──
-        st.markdown('<div class="section-header" style="margin-top:1.5rem;">Other Candidates</div>', unsafe_allow_html=True)
-        for name, prob in results[1:4]:
-            pct = prob * 100
-            loc = meta.get(name, {}).get("location", "")
-            st.markdown(f"""
-            <div class="other-card">
-                <div>
-                    <div class="other-name">{name}</div>
-                    <div style="font-family:'Josefin Sans',sans-serif; font-size:0.68rem; color:#8c7b6b; letter-spacing:0.08em;">{loc}</div>
+    with st.expander("See raw scores (all low)"):
+        for candidate in prediction["results"]:
+            st.markdown(
+                f"""
+                <div class="candidate-row">
+                    <div class="candidate-name">{candidate["name"]}</div>
+                    <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
                 </div>
-                <div class="other-pct">{pct:.1f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True,
+            )
 
-# ─── Footer ──────────────────────────────────────────────────────────────────
-st.markdown("""
-<hr style="border:none; border-top:1px solid #e8d49a; margin:3rem 0 1rem;">
-<div style="font-family:'Josefin Sans',sans-serif; font-size:0.65rem; color:#8c7b6b;
-            letter-spacing:0.2em; text-align:center; text-transform:uppercase; padding-bottom:1rem;">
-    T12.4 · Mughal Architecture Identifier · SMAI Assignment 3 · IIIT Hyderabad 2025–26 ·
-    Model: CLIP ViT-B/32 (Zero-Shot) · Metadata sourced from Wikipedia &amp; cached as JSON
-</div>
-""", unsafe_allow_html=True)
+
+def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
+    """Render the standard prediction panel for in-domain monument images.
+
+    Args:
+        image: Input image displayed back to the user.
+        prediction: Prediction payload from ``predict``.
+    """
+
+    top_result = prediction["results"][0]
+    monument_name = top_result["name"]
+    conf_band = confidence_band(top_result["probability"], prediction["top_margin"])
+    runner_up = prediction["results"][1] if len(prediction["results"]) > 1 else top_result
+
+    st.image(image, use_container_width=True)
+
+    st.markdown(
+        f"""
+        <div class="panel">
+            <div class="section-label">Prediction</div>
+            <h2 class="result-title serif">{monument_name}</h2>
+            <div class="result-subtitle">Runner-up: {runner_up["name"]}</div>
+            <div class="signal-strip">
+                <div class="signal-card">
+                    <div class="signal-label">Confidence</div>
+                    <div class="signal-value">{top_result["probability"] * 100:.1f}%</div>
+                </div>
+                <div class="signal-card">
+                    <div class="signal-label">Confidence Band</div>
+                    <div class="signal-value">{conf_band}</div>
+                </div>
+                <div class="signal-card">
+                    <div class="signal-label">Top Gap</div>
+                    <div class="signal-value">{prediction["top_margin"]:.3f}</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.progress(float(top_result["probability"]))
+    st.caption(
+        f"{prediction['prompt_count']} prompts | {prediction['view_count']} image views | "
+        f"runner-up: {runner_up['name']}"
+    )
+
+    if conf_band == "Low":
+        st.warning(
+            "Low-confidence result. The top two classes are close, so treat this prediction cautiously.",
+            icon="⚠️",
+        )
+
+    st.markdown('<div class="section-label" style="margin-top:1rem;">Top Scores</div>', unsafe_allow_html=True)
+    for candidate in prediction["results"][:5]:
+        st.markdown(
+            f"""
+            <div class="candidate-row">
+                <div>
+                    <div class="candidate-name">{candidate["name"]}</div>
+                    <div class="candidate-meta">{candidate["best_prompt"]}</div>
+                </div>
+                <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def main() -> None:
+    """Render the Streamlit UI and run model inference for the selected image."""
+
+    st.set_page_config(
+        page_title="Mughal Architecture Identifier",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+    st.markdown(CSS, unsafe_allow_html=True)
+    st.title("Mughal Architecture Identifier")
+    render_model_status_badge(resolve_model_status(FINETUNED_MODEL_DIR))
+
+    left_col, right_col = st.columns([1.0, 1.25], gap="large")
+
+    with left_col:
+        st.markdown('<div class="panel panel-tight">', unsafe_allow_html=True)
+        st.markdown('<div class="section-label">Upload Image</div>', unsafe_allow_html=True)
+        source = st.radio(
+            "Choose how to provide the monument image",
+            ["Upload file", "Paste screenshot", "Use camera"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+        selected_image: Image.Image | None = None
+
+        if source == "Upload file":
+            uploaded = st.file_uploader(
+                "Upload a monument photo",
+                type=["jpg", "jpeg", "png", "webp"],
+                help="Best results usually come from a clear exterior photo with the monument visible.",
+            )
+            selected_image = image_from_upload(uploaded)
+
+        elif source == "Paste screenshot":
+            st.caption("Click the button, then paste a copied screenshot or image from your clipboard.")
+            selected_image = image_from_clipboard()
+            if selected_image is not None and st.button("Clear pasted image", use_container_width=True):
+                st.session_state.pop("pasted_image", None)
+                st.rerun()
+
+        else:
+            camera_capture = st.camera_input("Take a monument photo")
+            selected_image = image_from_camera(camera_capture)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with right_col:
+        if selected_image is None:
+            st.markdown(
+                """
+                <div class="empty-state">
+                    <div class="section-label">Awaiting Image</div>
+                    <div class="empty-state-title serif">Upload a monument photo</div>
+                    <div class="empty-state-copy">
+                        Use upload, paste, or camera on the left. The right panel will show the image and ranked class scores.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            model, processor, bank, device, _ = load_clip()
+            with st.spinner("Running monument analysis..."):
+                prediction = predict(selected_image, model, processor, bank, device)
+            if prediction["is_ood"]:
+                render_ood_panel(prediction)
+            else:
+                render_result_panel(selected_image, prediction)
+
+
+if __name__ == "__main__":
+    main()

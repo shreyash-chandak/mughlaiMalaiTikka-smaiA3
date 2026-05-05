@@ -1,0 +1,160 @@
+# T12.4 Mughal Architecture Identifier - Worklog
+
+Date: 2026-05-05
+
+## Assignment boundary
+
+- Topic: `T12.4 - Mughal architecture identifier`
+- Allowed scope from `SMAI_Assignment_3_topics.pdf`:
+  - Streamlit app
+  - photo input -> predicted monument -> history paragraph -> visit info -> Google Maps
+  - zero-shot CLIP is explicitly allowed
+  - metadata can be scraped once and cached as JSON
+- Constraint followed in this update:
+  - the classifier remains a zero-shot CLIP system over 15 Mughal monument classes
+  - no supervised fine-tuning was introduced
+
+## What existed before this update
+
+- Single-file Streamlit app in `app.py`
+- One zero-shot CLIP prompt per class
+- Direct image-to-text scoring with no prompt ensembling
+- No image-view augmentation or reranking
+- Input mode only supported file upload
+- UI was visually styled, but the layout and interaction model were still narrow for actual demo use
+- No persistent implementation log for the report
+
+## Problems observed in the original version
+
+- Weak accuracy because each class had only one prompt
+- The classifier had no way to smooth over lighting, framing, or crop issues
+- Visually similar monuments had very little structured disambiguation
+- Confidence numbers were over-trusting because they came from a single-pass softmax
+- Input flow was incomplete for live demo situations
+
+## Accuracy improvement plan
+
+1. Keep the solution inside the zero-shot CLIP constraint.
+2. Replace single prompts with a multi-prompt ensemble per monument.
+3. Add multiple image views for each input image.
+4. Add a family-level zero-shot pass:
+   - mausoleum / tomb
+   - fort / fortress
+   - mosque
+   - minaret / tower
+   - garden
+   - complex / city
+5. Blend class score and family score instead of hard-switching models.
+6. Expose better confidence messaging in the UI.
+
+## Implemented changes
+
+### `app.py`
+
+- Rewrote the app into a cleaner module with reusable functions.
+- Added `MONUMENT_PROFILES` with structured visual descriptors for all 15 classes.
+- Added `FAMILY_PROMPTS` and `FAMILY_LABELS` for coarse monument-family inference.
+- Added `build_class_prompts()` to create multiple prompts per class.
+- Added `load_clip_bundle()` to cache:
+  - CLIP model
+  - processor
+  - prompt bank
+  - precomputed text features
+  - family features
+- Added `prepare_image_views()` for multi-view inference:
+  - original RGB image
+  - autocontrast image
+  - mild contrast-enhanced image
+  - sharpened image
+  - center-focused crop
+- Added `predict_monument()` for the improved classifier.
+- Added `predict_baseline()` so the old single-prompt approach can still be compared during validation.
+- Added confidence band logic for high / moderate / low confidence.
+- Added a professional, more structured UI layout.
+- Added three input modes:
+  - file upload
+  - clipboard paste
+  - camera capture
+- Added clearer result cards, alternative candidates, family signal, and prompt evidence.
+- Added assignment-fit notes and remaining limitations inside the app.
+
+## Follow-up fixes on 2026-05-05
+
+- Fixed a Streamlit runtime error caused by `st.warning(..., icon="!")`.
+  - Replaced the invalid icon with a valid single-emoji warning icon.
+- Fixed the confidence calibration issue where predictions were showing near-uniform scores such as `6.8%`.
+  - Replaced the old flattened softmax with a sharper score calibration based on score spread.
+- Simplified the UI substantially.
+  - Removed the extra explainer cards and report-style content from the main page.
+  - Kept only the title, left-side image input area, and right-side image plus ranked scores.
+- Added a specialist reranking path for the visually similar white-marble cluster:
+  - Taj Mahal
+  - Bibi Ka Maqbara
+  - Moti Masjid Agra
+  - Itmad-ud-Daulah
+- Added an extra close crop image view so the classifier pays more attention to monument structure and less to background clutter.
+
+### `requirements.txt`
+
+- Added `streamlit-paste-button>=0.1.2`
+- Removed unused direct dependency on `requests`
+
+### `.streamlit/config.toml`
+
+- Added a project-level light theme so native Streamlit widgets match the rest of the UI.
+- Added a max upload size setting.
+
+## UI changes
+
+- Cleaner hero section with assignment framing
+- Input source selector for demo flexibility
+- Clear empty state when no image is provided
+- Professional result panel with:
+  - top class
+  - confidence
+  - family classifier signal
+  - runner-up class
+  - visit information
+  - history
+  - Google Maps button
+  - alternative predictions
+- Added explanation cards for how the upgraded model works
+
+## Validation checklist
+
+- [x] Python syntax check in WSL venv
+- [x] Import and inference smoke test in WSL venv
+- [x] Baseline vs improved comparison on sample web images
+- [x] Final git status review
+
+## Validation results
+
+- `python -m py_compile app.py` passed inside the WSL venv.
+- Import + inference smoke test passed:
+  - the model loaded on CPU in WSL
+  - the upgraded prompt bank contained 90 prompts
+  - the predictor ran through 5 image views successfully
+- Streamlit startup smoke test passed:
+  - `streamlit run app.py --server.headless true` started successfully before timeout shutdown
+- Small benchmark on 6 clean Wikipedia thumbnail images:
+  - baseline single-prompt CLIP: `6 / 6`
+  - upgraded ensemble CLIP: `6 / 6`
+- Interpretation of the benchmark:
+  - the thumbnails are very canonical reference images, so they are easy for both models
+  - this check verifies functional correctness
+  - it does not fully capture the expected gain on harder real-world photos, where the new prompt ensemble and multi-view scoring should matter more
+
+## Known limitations that still remain
+
+- Zero-shot CLIP can still confuse visually similar white-domed Mughal tombs.
+- Interior shots, night images, and heavily cropped photos are still hard.
+- There is still no supervised training set evaluation inside the repo yet.
+
+## Notes for final report
+
+- This update should be described as an inference-time accuracy improvement, not a model-training change.
+- The strongest methodological additions are:
+  - prompt ensembling
+  - multi-view image scoring
+  - family-aware reranking
+  - richer input UX for live demos
