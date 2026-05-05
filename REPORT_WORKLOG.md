@@ -94,6 +94,63 @@ Date: 2026-05-05
   - Itmad-ud-Daulah
 - Added an extra close crop image view so the classifier pays more attention to monument structure and less to background clutter.
 
+## India-only class revision on 2026-05-05
+
+- Removed the non-Indian classes:
+  - `Lahore Fort`
+  - `Badshahi Mosque`
+- Added the replacement Indian classes:
+  - `Buland Darwaza`
+  - `Tomb of Salim Chishti`
+- Updated:
+  - `MONUMENT_PROFILES`
+  - `BASELINE_PROMPTS`
+  - `PROMPT_ENSEMBLES` indirectly via `build_class_prompts()`
+  - `metadata.json`
+
+## Hybrid specialist inference on 2026-05-05
+
+- Kept full zero-shot CLIP as the first-stage classifier for all 15 monuments.
+- Added a second-stage refinement path:
+  - if the top zero-shot prediction belongs to the specialist cluster
+  - and a fine-tuned checkpoint exists
+  - rerun prediction with the fine-tuned specialist model restricted to its trained classes
+- Added `SPECIALIST_CLUSTER` for:
+  - Taj Mahal
+  - Bibi Ka Maqbara
+  - Itmad-ud-Daulah
+  - Moti Masjid Agra
+  - Red Fort
+  - Agra Fort
+  - Fatehpur Sikri
+  - Jama Masjid Delhi
+  - Humayun's Tomb
+- Changed the model badge semantics:
+  - base-only fallback still shows the base badge
+  - specialist availability now shows a hybrid-active badge
+
+## Partial fine-tuning data logic on 2026-05-05
+
+- Updated `train.py` so it no longer assumes all prompt classes are being trained.
+- Training records are now discovered from `./data/` using folder names for the specialist cluster.
+- Actual training/evaluation class names are now derived from:
+  - `sorted(set(record.monument_name for record in records))`
+- Validation prompt encoding is restricted to only those discovered classes.
+
+## Dataset skeleton on 2026-05-05
+
+- Created the empty dataset directory structure:
+  - `data/Taj Mahal/`
+  - `data/Bibi Ka Maqbara/`
+  - `data/Itmad-ud-Daulah/`
+  - `data/Moti Masjid Agra/`
+  - `data/Red Fort/`
+  - `data/Agra Fort/`
+  - `data/Fatehpur Sikri/`
+  - `data/Jama Masjid Delhi/`
+  - `data/Humayun's Tomb/`
+- These directories are placeholders only and were intentionally left empty.
+
 ### `requirements.txt`
 
 - Added `streamlit-paste-button>=0.1.2`

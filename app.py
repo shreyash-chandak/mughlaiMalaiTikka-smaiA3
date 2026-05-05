@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 from dataclasses import dataclass
@@ -13,6 +15,17 @@ from transformers import CLIPModel, CLIPProcessor
 MODEL_NAME = "openai/clip-vit-base-patch32"
 FINETUNED_MODEL_DIR = "clip_mughal_finetuned"
 OOD_THRESHOLD = 0.15  # Random chance is about 6.7% for 15 classes; 15% is a safer boundary between noise and a plausible match.
+SPECIALIST_CLUSTER = [
+    "Taj Mahal",
+    "Bibi Ka Maqbara",
+    "Itmad-ud-Daulah",
+    "Moti Masjid Agra",
+    "Red Fort",
+    "Agra Fort",
+    "Fatehpur Sikri",
+    "Jama Masjid Delhi",
+    "Humayun's Tomb",
+]
 
 
 MONUMENT_PROFILES: dict[str, dict[str, Any]] = {
@@ -146,30 +159,30 @@ MONUMENT_PROFILES: dict[str, dict[str, Any]] = {
             "open pavilions at the top",
         ],
     },
-    "Lahore Fort": {
-        "aliases": ["Lahore Fort", "Shahi Qila"],
-        "family": "fort",
-        "place": "Lahore, Pakistan",
-        "material": "red sandstone and decorated stucco",
-        "style": "fortress-palace",
+    "Buland Darwaza": {
+        "aliases": ["Buland Darwaza"],
+        "family": "complex",
+        "place": "Fatehpur Sikri, Uttar Pradesh, India",
+        "material": "red sandstone",
+        "style": "monumental gateway",
         "signatures": [
-            "fortified walls",
-            "ornate palace facades",
-            "Mughal courtyards",
-            "high ceremonial gateways",
+            "massive arched gateway",
+            "grand staircase",
+            "high central arch",
+            "Mughal calligraphy and ornamentation",
         ],
     },
-    "Badshahi Mosque": {
-        "aliases": ["Badshahi Mosque"],
-        "family": "mosque",
-        "place": "Lahore, Pakistan",
-        "material": "red sandstone with white marble domes",
-        "style": "grand imperial mosque",
+    "Tomb of Salim Chishti": {
+        "aliases": ["Tomb of Salim Chishti", "Salim Chishti Tomb"],
+        "family": "mausoleum",
+        "place": "Fatehpur Sikri, Uttar Pradesh, India",
+        "material": "white marble",
+        "style": "Mughal tomb",
         "signatures": [
-            "three large white domes",
-            "four tall corner minarets",
-            "a vast open courtyard",
-            "a long red sandstone prayer hall",
+            "small white marble structure",
+            "intricate lattice screens",
+            "square layout",
+            "delicate carvings",
         ],
     },
     "Shalimar Bagh": {
@@ -263,8 +276,8 @@ BASELINE_PROMPTS: dict[str, str] = {
     "Qutub Minar": "a photograph of Qutub Minar, a tall tapering brick minaret with ornate bands and balconies in Mehrauli Delhi India",
     "Bibi Ka Maqbara": "a photograph of Bibi Ka Maqbara also known as Taj of the Deccan, a white marble Mughal mausoleum in Aurangabad Maharashtra resembling the Taj Mahal",
     "Akbar's Tomb": "a photograph of Akbar's Tomb in Sikandra, a multi-story Mughal mausoleum with red sandstone terraces and white marble pavilions near Agra",
-    "Lahore Fort": "a photograph of Lahore Fort also called Shahi Qila, a large Mughal fortress with decorated facades and the Sheesh Mahal palace in Lahore Pakistan",
-    "Badshahi Mosque": "a photograph of Badshahi Mosque in Lahore, a grand Mughal mosque with large red sandstone courtyard and three white marble onion domes in Pakistan",
+    "Buland Darwaza": "a photograph of Buland Darwaza, a monumental red sandstone Mughal gateway at Fatehpur Sikri with a grand staircase and a high central arch",
+    "Tomb of Salim Chishti": "a photograph of the Tomb of Salim Chishti, a small white marble Mughal tomb at Fatehpur Sikri with intricate lattice screens and delicate carvings",
     "Shalimar Bagh": "a photograph of Shalimar Bagh in Srinagar, a terraced Mughal garden with fountains, water channels and chinar trees beside Dal Lake in Kashmir",
     "Moti Masjid Agra": "a photograph of Moti Masjid inside Agra Fort, a small pure white marble Mughal mosque with three marble domes and graceful arches",
     "Safdarjung Tomb": "a photograph of Safdarjung Tomb, a late Mughal sandstone mausoleum with a central dome and four corner towers surrounded by gardens in New Delhi",
@@ -683,6 +696,16 @@ class ModelStatus:
     best_val_top1: float | None = None
 
 
+@dataclass
+class SpecialistBundle:
+    """Hold an optional fine-tuned specialist model and its restricted prompt bank."""
+
+    model: CLIPModel | None
+    processor: CLIPProcessor | None
+    bank: PromptBank | None
+    class_names: list[str]
+
+
 def load_metadata() -> dict[str, Any]:
     """Load cached monument metadata from disk.
 
@@ -790,6 +813,56 @@ def build_specialist_features(
             specialist_features[group_name][monument_name] = normalize(features)
 
     return specialist_features
+
+
+def build_prompt_bank(
+    model: CLIPModel,
+    processor: CLIPProcessor,
+    device: torch.device,
+    prompts_by_class: dict[str, list[str]],
+) -> PromptBank:
+    """Build a prompt bank for a specific class subset.
+
+    Args:
+        model: Loaded CLIP model.
+        processor: Matching CLIP processor.
+        device: Torch device used for feature extraction.
+        prompts_by_class: Prompt ensemble keyed by class name.
+
+    Returns:
+        PromptBank: Cached prompt features and lookup metadata.
+    """
+
+    class_names = list(prompts_by_class.keys())
+    flat_prompts: list[str] = []
+    class_prompt_indices: dict[str, list[int]] = {}
+
+    for class_name in class_names:
+        indices: list[int] = []
+        for prompt in prompts_by_class[class_name]:
+            indices.append(len(flat_prompts))
+            flat_prompts.append(prompt)
+        class_prompt_indices[class_name] = indices
+
+    encoded = processor(text=flat_prompts, return_tensors="pt", padding=True, truncation=True)
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+    with torch.no_grad():
+        text_features = extract_text_features(model, encoded)
+    text_features = normalize(text_features)
+
+    family_names, family_features = build_family_features(model, processor, device)
+    specialist_features = build_specialist_features(model, processor, device)
+    return PromptBank(
+        class_names=class_names,
+        prompts_by_class=prompts_by_class,
+        flat_prompts=flat_prompts,
+        class_prompt_indices=class_prompt_indices,
+        text_features=text_features,
+        family_names=family_names,
+        family_features=family_features,
+        family_lookup={name: MONUMENT_PROFILES[name]["family"] for name in class_names},
+        specialist_features=specialist_features,
+    )
 
 
 def normalize(tensor: torch.Tensor) -> torch.Tensor:
@@ -947,9 +1020,9 @@ def resolve_model_status(model_dir: str) -> ModelStatus:
     training_log = load_training_log(model_dir)
     best_val_top1 = training_log.get("best_val_top1")
     if isinstance(best_val_top1, (float, int)):
-        badge_text = f"✦ Fine-tuned model active · val top-1 {best_val_top1 * 100:.1f}%"
+        badge_text = f"✦ Hybrid model active · specialist val top-1 {best_val_top1 * 100:.1f}%"
     else:
-        badge_text = "✦ Fine-tuned model active"
+        badge_text = "✦ Hybrid model active"
 
     return ModelStatus(
         is_finetuned=True,
@@ -960,52 +1033,47 @@ def resolve_model_status(model_dir: str) -> ModelStatus:
 
 
 @st.cache_resource(show_spinner=False)
-def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, torch.device, ModelStatus]:
-    """Load the active CLIP model, processor, prompt bank, and model-status badge.
+def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle, torch.device, ModelStatus]:
+    """Load the base zero-shot CLIP model and an optional fine-tuned specialist model.
 
     Returns:
-        tuple[CLIPModel, CLIPProcessor, PromptBank, torch.device, ModelStatus]:
-            Active model bundle plus UI badge metadata.
+        tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle, torch.device, ModelStatus]:
+            Base model assets, optional specialist assets, runtime device, and badge metadata.
     """
 
     device = get_device()
     model_status = resolve_model_status(FINETUNED_MODEL_DIR)
-    model_source = FINETUNED_MODEL_DIR if model_status.is_finetuned else MODEL_NAME
-    model = CLIPModel.from_pretrained(model_source).to(device)
-    processor = CLIPProcessor.from_pretrained(model_source)
-    model.eval()
 
-    class_names = list(PROMPT_ENSEMBLES.keys())
-    flat_prompts: list[str] = []
-    class_prompt_indices: dict[str, list[int]] = {}
+    base_model = CLIPModel.from_pretrained(MODEL_NAME).to(device)
+    base_processor = CLIPProcessor.from_pretrained(MODEL_NAME)
+    base_model.eval()
+    base_bank = build_prompt_bank(base_model, base_processor, device, PROMPT_ENSEMBLES)
 
-    for class_name in class_names:
-        indices: list[int] = []
-        for prompt in PROMPT_ENSEMBLES[class_name]:
-            indices.append(len(flat_prompts))
-            flat_prompts.append(prompt)
-        class_prompt_indices[class_name] = indices
+    specialist_bundle = SpecialistBundle(model=None, processor=None, bank=None, class_names=[])
+    if model_status.is_finetuned:
+        specialist_log = load_training_log(FINETUNED_MODEL_DIR)
+        specialist_class_names = specialist_log.get("class_names", [])
+        if not specialist_class_names:
+            specialist_class_names = SPECIALIST_CLUSTER
 
-    encoded = processor(text=flat_prompts, return_tensors="pt", padding=True, truncation=True)
-    encoded = {key: value.to(device) for key, value in encoded.items()}
-    with torch.no_grad():
-        text_features = extract_text_features(model, encoded)
-    text_features = normalize(text_features)
+        specialist_prompts = {
+            class_name: PROMPT_ENSEMBLES[class_name]
+            for class_name in specialist_class_names
+            if class_name in PROMPT_ENSEMBLES
+        }
+        if specialist_prompts:
+            specialist_model = CLIPModel.from_pretrained(FINETUNED_MODEL_DIR).to(device)
+            specialist_processor = CLIPProcessor.from_pretrained(FINETUNED_MODEL_DIR)
+            specialist_model.eval()
+            specialist_bank = build_prompt_bank(specialist_model, specialist_processor, device, specialist_prompts)
+            specialist_bundle = SpecialistBundle(
+                model=specialist_model,
+                processor=specialist_processor,
+                bank=specialist_bank,
+                class_names=list(specialist_prompts.keys()),
+            )
 
-    family_names, family_features = build_family_features(model, processor, device)
-    specialist_features = build_specialist_features(model, processor, device)
-    bank = PromptBank(
-        class_names=class_names,
-        prompts_by_class=PROMPT_ENSEMBLES,
-        flat_prompts=flat_prompts,
-        class_prompt_indices=class_prompt_indices,
-        text_features=text_features,
-        family_names=family_names,
-        family_features=family_features,
-        family_lookup={name: MONUMENT_PROFILES[name]["family"] for name in class_names},
-        specialist_features=specialist_features,
-    )
-    return model, processor, bank, device, model_status
+    return base_model, base_processor, base_bank, specialist_bundle, device, model_status
 
 
 def center_crop(image: Image.Image, crop_ratio: float) -> Image.Image:
@@ -1155,6 +1223,52 @@ def predict(
         "prompt_count": len(bank.flat_prompts),
         "is_ood": is_ood,
     }
+
+
+def refine_with_specialist(
+    image: Image.Image,
+    zero_shot_prediction: dict[str, Any],
+    specialist_bundle: SpecialistBundle,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Refine zero-shot predictions with the fine-tuned specialist model for cluster classes.
+
+    Args:
+        image: Input monument image.
+        zero_shot_prediction: Base zero-shot prediction payload.
+        specialist_bundle: Optional specialist model assets.
+        device: Torch device used for inference.
+
+    Returns:
+        dict[str, Any]: Final prediction payload after optional specialist refinement.
+    """
+
+    if zero_shot_prediction["is_ood"]:
+        return zero_shot_prediction
+
+    if specialist_bundle.model is None or specialist_bundle.processor is None or specialist_bundle.bank is None:
+        return zero_shot_prediction
+
+    top_name = zero_shot_prediction["results"][0]["name"]
+    if top_name not in SPECIALIST_CLUSTER or top_name not in specialist_bundle.class_names:
+        return zero_shot_prediction
+
+    specialist_prediction = predict(
+        image=image,
+        model=specialist_bundle.model,
+        processor=specialist_bundle.processor,
+        bank=specialist_bundle.bank,
+        device=device,
+    )
+
+    specialist_prediction["is_ood"] = False
+    specialist_prediction["results"].extend(
+        result
+        for result in zero_shot_prediction["results"]
+        if result["name"] not in specialist_bundle.class_names
+    )
+    specialist_prediction["refined_by_specialist"] = True
+    return specialist_prediction
 
 
 @torch.no_grad()
@@ -1350,10 +1464,14 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
     )
 
     st.progress(float(top_result["probability"]))
-    st.caption(
-        f"{prediction['prompt_count']} prompts | {prediction['view_count']} image views | "
-        f"runner-up: {runner_up['name']}"
-    )
+    caption_parts = [
+        f"{prediction['prompt_count']} prompts",
+        f"{prediction['view_count']} image views",
+        f"runner-up: {runner_up['name']}",
+    ]
+    if prediction.get("refined_by_specialist"):
+        caption_parts.append("specialist refinement active")
+    st.caption(" | ".join(caption_parts))
 
     if conf_band == "Low":
         st.warning(
@@ -1439,9 +1557,10 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
         else:
-            model, processor, bank, device, _ = load_clip()
+            model, processor, bank, specialist_bundle, device, _ = load_clip()
             with st.spinner("Running monument analysis..."):
                 prediction = predict(selected_image, model, processor, bank, device)
+                prediction = refine_with_specialist(selected_image, prediction, specialist_bundle, device)
             if prediction["is_ood"]:
                 render_ood_panel(prediction)
             else:

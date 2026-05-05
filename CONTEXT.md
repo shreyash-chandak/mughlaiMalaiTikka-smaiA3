@@ -42,3 +42,24 @@ Training script: train.py (created in Session 2)
 **Files modified:** `CONTEXT.md`
 **Key decisions:** Kept entries append-only and task-scoped so future sessions can quickly reconstruct what changed and why.
 **Known issues / TODO:** Future sessions should continue appending here instead of splitting context across multiple logs.
+
+## 2026-05-05 - India-Only Class Update and Hybrid Specialist Inference
+
+**What changed:** Replaced the Pakistan classes `Lahore Fort` and `Badshahi Mosque` with `Buland Darwaza` and `Tomb of Salim Chishti` across `app.py` and `metadata.json`. Added `SPECIALIST_CLUSTER`, changed inference to always run base zero-shot CLIP first and then optionally refine cluster predictions with a fine-tuned specialist model checkpoint if one exists.
+**Files modified:** `app.py`, `metadata.json`
+**Key decisions:** Kept the base zero-shot model as the universal first-pass classifier for all 15 monuments, then restricted specialist refinement to the nine visually confusing classes named in the new brief. The status badge now reflects hybrid specialist availability instead of implying that the entire app runs only on the fine-tuned checkpoint.
+**Known issues / TODO:** The specialist refinement path depends on a partial fine-tuned checkpoint being available in `./clip_mughal_finetuned/`; otherwise the app remains base zero-shot only.
+
+## 2026-05-05 - Partial Fine-Tuning Dataset Logic
+
+**What changed:** Updated `train.py` so training records are discovered from the dataset structure itself, limited to the specialist cluster, and the actual training/evaluation class list is now derived dynamically from `sorted(set(record.monument_name for record in records))`.
+**Files modified:** `train.py`
+**Key decisions:** Kept under-population warnings aligned to the expected specialist training folders, but kept train/val/eval class handling aligned to the classes that are actually present on disk.
+**Known issues / TODO:** If no training images exist, the script exits cleanly after warnings; real specialist training still requires the dataset to be populated manually.
+
+## 2026-05-05 - Dataset Skeleton and Report Sync
+
+**What changed:** Created the empty `data/` folder skeleton for the nine specialist classes and synchronized the implementation notes with `REPORT_WORKLOG.md`.
+**Files modified:** `CONTEXT.md`, `REPORT_WORKLOG.md`, `data/`
+**Key decisions:** Used exact folder names from the code so training can read the dataset without any rename step.
+**Known issues / TODO:** The directories are empty placeholders only and must be populated with images before fine-tuning.

@@ -20,7 +20,7 @@ from torchvision import transforms
 from tqdm import tqdm
 from transformers import CLIPModel, CLIPProcessor
 
-from app import MODEL_NAME, PROMPT_ENSEMBLES, extract_image_features, extract_text_features, normalize
+from app import MODEL_NAME, PROMPT_ENSEMBLES, SPECIALIST_CLUSTER, extract_image_features, extract_text_features, normalize
 
 
 SEED = 42
@@ -133,12 +133,11 @@ def build_transforms() -> tuple[transforms.Compose, transforms.Compose]:
     return train_transform, val_transform
 
 
-def collect_image_records(data_dir: str, class_names: list[str]) -> tuple[list[ImageRecord], Counter]:
-    """Collect image paths from the expected ``data/<ClassName>/`` layout.
+def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], Counter]:
+    """Collect image paths from the dataset directory using supported class-folder names.
 
     Args:
         data_dir: Root data directory.
-        class_names: Supported class names from ``PROMPT_ENSEMBLES``.
 
     Returns:
         tuple[list[ImageRecord], Counter]: Image records and class-count statistics.
@@ -147,21 +146,22 @@ def collect_image_records(data_dir: str, class_names: list[str]) -> tuple[list[I
     image_records: list[ImageRecord] = []
     class_counts: Counter = Counter()
     valid_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+    supported_classes = set(SPECIALIST_CLUSTER)
 
     if not os.path.isdir(data_dir):
         print(f"Warning: data directory '{data_dir}' does not exist. No images were found.")
         return image_records, class_counts
 
-    for monument_name in class_names:
-        monument_dir = os.path.join(data_dir, monument_name)
-        if not os.path.isdir(monument_dir):
+    for root, _, files in os.walk(data_dir):
+        class_name = os.path.basename(root)
+        if class_name not in supported_classes:
             continue
 
-        for file_name in sorted(os.listdir(monument_dir)):
-            image_path = os.path.join(monument_dir, file_name)
+        for file_name in sorted(files):
+            image_path = os.path.join(root, file_name)
             if os.path.isfile(image_path) and os.path.splitext(file_name)[1].lower() in valid_suffixes:
-                image_records.append(ImageRecord(image_path=image_path, monument_name=monument_name))
-                class_counts[monument_name] += 1
+                image_records.append(ImageRecord(image_path=image_path, monument_name=class_name))
+                class_counts[class_name] += 1
 
     return image_records, class_counts
 
@@ -321,6 +321,7 @@ def encode_prompt_ensembles(
     model: CLIPModel,
     processor: CLIPProcessor,
     device: torch.device,
+    class_names: list[str],
 ) -> tuple[list[str], torch.Tensor]:
     """Encode prompt ensembles into one normalized embedding per class.
 
@@ -328,12 +329,12 @@ def encode_prompt_ensembles(
         model: CLIP model used for text encoding.
         processor: CLIP processor used for tokenization.
         device: Torch device for feature extraction.
+        class_names: Available class names that should be encoded.
 
     Returns:
         tuple[list[str], torch.Tensor]: Class names and normalized class embeddings.
     """
 
-    class_names = list(PROMPT_ENSEMBLES.keys())
     class_embeddings: list[torch.Tensor] = []
 
     for monument_name in class_names:
@@ -357,6 +358,7 @@ def evaluate_zero_shot_top1(
     processor: CLIPProcessor,
     dataloader: DataLoader,
     device: torch.device,
+    class_names: list[str],
 ) -> float:
     """Evaluate validation accuracy with the prompt ensembles from ``app.py``.
 
@@ -365,6 +367,7 @@ def evaluate_zero_shot_top1(
         processor: CLIP processor for validation image preprocessing.
         dataloader: Validation dataloader.
         device: Torch device for evaluation.
+        class_names: Available class names that should be evaluated.
 
     Returns:
         float: Top-1 validation accuracy in ``[0, 1]``.
@@ -373,7 +376,7 @@ def evaluate_zero_shot_top1(
     if len(dataloader.dataset) == 0:
         return 0.0
 
-    class_names, class_embeddings = encode_prompt_ensembles(model, processor, device)
+    class_names, class_embeddings = encode_prompt_ensembles(model, processor, device, class_names)
     class_to_index = {name: index for index, name in enumerate(class_names)}
 
     correct = 0
@@ -529,9 +532,10 @@ def main() -> None:
     args = parse_args()
     set_seed(SEED)
 
-    class_names = list(PROMPT_ENSEMBLES.keys())
-    records, class_counts = collect_image_records(args.data_dir, class_names)
-    warn_underpopulated_classes(class_names, class_counts)
+    expected_training_classes = SPECIALIST_CLUSTER
+    records, class_counts = collect_image_records(args.data_dir)
+    class_names = sorted(set(record.monument_name for record in records))
+    warn_underpopulated_classes(expected_training_classes, class_counts)
 
     if len(records) < 2:
         print("Not enough images were found to create a train/validation split. Exiting without training.")
@@ -564,7 +568,7 @@ def main() -> None:
         epochs_ran = epoch_index + 1
         train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, use_amp)
         model.eval()
-        val_top1 = evaluate_zero_shot_top1(model, processor, val_loader, device)
+        val_top1 = evaluate_zero_shot_top1(model, processor, val_loader, device, class_names)
         scheduler.step()
 
         print(f"Epoch {epoch_index + 1} | train_loss: {train_loss:.4f} | val_top1: {val_top1 * 100:.1f}%")
