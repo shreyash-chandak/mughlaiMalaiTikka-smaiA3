@@ -1206,8 +1206,9 @@ def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle,
             if class_name in PROMPT_ENSEMBLES
         }
         if specialist_prompts:
-            specialist_model = CLIPModel.from_pretrained(FINETUNED_MODEL_DIR).to(device)
-            specialist_processor = CLIPProcessor.from_pretrained(FINETUNED_MODEL_DIR)
+            MODEL_ID = "platynator/clip-mughal-model"
+            specialist_model = CLIPModel.from_pretrained(MODEL_ID)
+            specialist_processor = CLIPProcessor.from_pretrained(MODEL_ID)
             specialist_model.eval()
             specialist_bank = build_prompt_bank(specialist_model, specialist_processor, device, specialist_prompts)
             specialist_bundle = SpecialistBundle(
