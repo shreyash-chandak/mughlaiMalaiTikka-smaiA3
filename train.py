@@ -8,10 +8,11 @@ from datetime import datetime
 from functools import partial
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -23,7 +24,8 @@ from transformers import CLIPModel, CLIPProcessor
 from app import MODEL_NAME, PROMPT_ENSEMBLES, SPECIALIST_CLUSTER, extract_image_features, extract_text_features, normalize
 
 
-SEED = 42
+APPROX_K_FOLDS = 7
+TRAINABLE_VISION_BLOCKS = (7, 8, 9, 10, 11)
 
 
 @dataclass
@@ -35,31 +37,52 @@ class ImageRecord:
 
 
 class MughalMonumentDataset(Dataset):
-    """Load monument images and pair them with CLIP-compatible text prompts.
+    """Expose original and augmented copies of every image record.
 
     Args:
         records: Image records to expose through the dataset.
-        transform: Optional torchvision transform applied to each PIL image.
+        original_transform: Transform used for the original copy of each image.
+        augmented_transform: Transform used for the augmented copy of each image.
+        include_augmented_copy: Whether to append an additional augmented sample per record.
+        deterministic_seed_base: Optional base seed used to make augmented evaluation samples deterministic.
     """
 
-    def __init__(self, records: list[ImageRecord], transform: transforms.Compose | None = None) -> None:
-        """Store dataset records and an optional image transform.
+    def __init__(
+        self,
+        records: list[ImageRecord],
+        original_transform: transforms.Compose,
+        augmented_transform: transforms.Compose,
+        include_augmented_copy: bool,
+        deterministic_seed_base: int | None = None,
+    ) -> None:
+        """Store dataset records, transforms, and duplication behavior.
 
         Args:
             records: Image records to expose through the dataset.
-            transform: Optional torchvision transform applied to each PIL image.
+            original_transform: Transform used for the original copy of each image.
+            augmented_transform: Transform used for the augmented copy of each image.
+            include_augmented_copy: Whether to append an additional augmented sample per record.
+            deterministic_seed_base: Optional base seed used to make augmented evaluation samples deterministic.
         """
 
         self.records = records
-        self.transform = transform
+        self.original_transform = original_transform
+        self.augmented_transform = augmented_transform
+        self.include_augmented_copy = include_augmented_copy
+        self.deterministic_seed_base = deterministic_seed_base
 
     def __len__(self) -> int:
-        """Return the number of image records in the dataset."""
+        """Return the number of samples, including augmented copies when enabled.
 
-        return len(self.records)
+        Returns:
+            int: Dataset length.
+        """
+
+        multiplier = 2 if self.include_augmented_copy else 1
+        return len(self.records) * multiplier
 
     def __getitem__(self, index: int) -> tuple[Image.Image, str, str]:
-        """Load one image sample and the exact training text template.
+        """Load one original or augmented sample and its CLIP training text.
 
         Args:
             index: Dataset index.
@@ -68,13 +91,43 @@ class MughalMonumentDataset(Dataset):
             tuple[Image.Image, str, str]: Image, paired text prompt, and class label.
         """
 
-        record = self.records[index]
+        record_index = index // 2 if self.include_augmented_copy else index
+        use_augmented_copy = self.include_augmented_copy and index % 2 == 1
+        record = self.records[record_index]
         image = Image.open(record.image_path).convert("RGB")
-        if self.transform is not None:
-            image = self.transform(image)
+
+        if use_augmented_copy:
+            image = self.apply_transform(image, self.augmented_transform, record_index)
+        else:
+            image = self.apply_transform(image, self.original_transform, record_index)
 
         text = f"a photograph of {record.monument_name}, a Mughal monument"
         return image, text, record.monument_name
+
+    def apply_transform(self, image: Image.Image, transform: transforms.Compose, record_index: int) -> Image.Image:
+        """Apply a transform, optionally with deterministic randomness for eval splits.
+
+        Args:
+            image: Input PIL image.
+            transform: Transform pipeline to apply.
+            record_index: Index of the underlying record.
+
+        Returns:
+            Image.Image: Transformed image.
+        """
+
+        if self.deterministic_seed_base is None:
+            return transform(image)
+
+        random_state = random.getstate()
+        torch_state = torch.random.get_rng_state()
+        deterministic_seed = self.deterministic_seed_base + record_index
+        random.seed(deterministic_seed)
+        torch.manual_seed(deterministic_seed)
+        transformed = transform(image)
+        random.setstate(random_state)
+        torch.random.set_rng_state(torch_state)
+        return transformed
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,7 +140,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune CLIP for Mughal monument identification.")
     parser.add_argument("--data_dir", default="./data", help="Directory containing class folders of images.")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training and validation.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training and evaluation.")
+    parser.add_argument("--seed", type=int, default=42, help="Base random seed for repeated k-fold runs.")
+    parser.add_argument("--runs", type=int, default=3, help="Number of repeated k-fold cycles to execute.")
     parser.add_argument(
         "--output_dir",
         default="./clip_mughal_finetuned",
@@ -97,40 +152,42 @@ def parse_args() -> argparse.Namespace:
 
 
 def set_seed(seed: int) -> None:
-    """Set random seeds for reproducible training splits and shuffling.
+    """Set random seeds for reproducible training, splits, and augment sampling.
 
     Args:
         seed: Random seed value.
     """
 
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
 def build_transforms() -> tuple[transforms.Compose, transforms.Compose]:
-    """Create train and validation image transforms.
+    """Create original and augmented transform pipelines.
 
     Returns:
-        tuple[transforms.Compose, transforms.Compose]: Training and validation transforms.
+        tuple[transforms.Compose, transforms.Compose]: Original-view and augmented-view transforms.
     """
 
-    train_transform = transforms.Compose(
-        [
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomResizedCrop(224, scale=(0.7, 1.0)),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
-            transforms.RandomGrayscale(p=0.05),
-        ]
-    )
-    val_transform = transforms.Compose(
+    original_transform = transforms.Compose(
         [
             transforms.Resize(256),
             transforms.CenterCrop(224),
         ]
     )
-    return train_transform, val_transform
+    augmented_transform = transforms.Compose(
+        [
+            transforms.RandomResizedCrop(224, scale=(0.7, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(8),
+            transforms.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.12),
+            transforms.RandomPerspective(distortion_scale=0.15, p=0.35),
+        ]
+    )
+    return original_transform, augmented_transform
 
 
 def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], Counter]:
@@ -143,14 +200,14 @@ def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], Counter]:
         tuple[list[ImageRecord], Counter]: Image records and class-count statistics.
     """
 
-    image_records: list[ImageRecord] = []
     class_counts: Counter = Counter()
     valid_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
     supported_classes = set(SPECIALIST_CLUSTER)
+    grouped_paths: defaultdict[str, list[str]] = defaultdict(list)
 
     if not os.path.isdir(data_dir):
         print(f"Warning: data directory '{data_dir}' does not exist. No images were found.")
-        return image_records, class_counts
+        return [], class_counts
 
     for root, _, files in os.walk(data_dir):
         class_name = os.path.basename(root)
@@ -160,8 +217,16 @@ def collect_image_records(data_dir: str) -> tuple[list[ImageRecord], Counter]:
         for file_name in sorted(files):
             image_path = os.path.join(root, file_name)
             if os.path.isfile(image_path) and os.path.splitext(file_name)[1].lower() in valid_suffixes:
-                image_records.append(ImageRecord(image_path=image_path, monument_name=class_name))
-                class_counts[class_name] += 1
+                grouped_paths[class_name].append(image_path)
+
+    image_records: list[ImageRecord] = []
+    for class_name, image_paths in grouped_paths.items():
+        if len(image_paths) > 80:
+            image_paths = random.sample(image_paths, 80)
+
+        for image_path in sorted(image_paths):
+            image_records.append(ImageRecord(image_path=image_path, monument_name=class_name))
+            class_counts[class_name] += 1
 
     return image_records, class_counts
 
@@ -181,54 +246,48 @@ def warn_underpopulated_classes(class_names: list[str], class_counts: Counter) -
             print(f"  - {monument_name}: {class_counts.get(monument_name, 0)} images")
 
 
-def split_records(records: list[ImageRecord]) -> tuple[list[ImageRecord], list[ImageRecord]]:
-    """Split records into train and validation sets with stratification when possible.
+def build_fold_splits(records: list[ImageRecord], seed: int) -> list[tuple[list[ImageRecord], list[ImageRecord], list[ImageRecord]]]:
+    """Build approximate 70/15/15 train/val/test folds using 7-way stratified rotation.
 
     Args:
         records: Full set of discovered image records.
+        seed: Random seed used to shuffle folds reproducibly.
 
     Returns:
-        tuple[list[ImageRecord], list[ImageRecord]]: Train and validation splits.
+        list[tuple[list[ImageRecord], list[ImageRecord], list[ImageRecord]]]:
+            Rotating train/validation/test fold triples.
     """
 
-    if len(records) < 2:
-        return records, []
+    if len(records) < 3:
+        return []
 
     labels = [record.monument_name for record in records]
     label_counts = Counter(labels)
-    can_stratify = all(count >= 2 for count in label_counts.values()) and len(label_counts) >= 2
+    min_class_count = min(label_counts.values()) if label_counts else 0
+    if min_class_count < 3:
+        return []
 
-    if can_stratify:
-        train_records, val_records = train_test_split(
-            records,
-            test_size=0.2,
-            random_state=SEED,
-            shuffle=True,
-            stratify=labels,
-        )
-        return list(train_records), list(val_records)
+    n_splits = min(APPROX_K_FOLDS, min_class_count)
+    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    all_indices = np.arange(len(records))
+    fold_indices = [test_indices.tolist() for _, test_indices in splitter.split(all_indices, labels)]
 
-    print("Warning: stratified split was not possible for every class; using a class-aware fallback split.")
-    grouped: defaultdict[str, list[ImageRecord]] = defaultdict(list)
-    for record in records:
-        grouped[record.monument_name].append(record)
+    fold_splits: list[tuple[list[ImageRecord], list[ImageRecord], list[ImageRecord]]] = []
+    for fold_index in range(n_splits):
+        test_indices = set(fold_indices[fold_index])
+        val_indices = set(fold_indices[(fold_index + 1) % n_splits])
+        train_indices = [
+            index
+            for index in range(len(records))
+            if index not in test_indices and index not in val_indices
+        ]
 
-    rng = random.Random(SEED)
-    train_records: list[ImageRecord] = []
-    val_records: list[ImageRecord] = []
+        train_records = [records[index] for index in train_indices]
+        val_records = [records[index] for index in sorted(val_indices)]
+        test_records = [records[index] for index in sorted(test_indices)]
+        fold_splits.append((train_records, val_records, test_records))
 
-    for class_records in grouped.values():
-        rng.shuffle(class_records)
-        if len(class_records) == 1:
-            train_records.extend(class_records)
-            continue
-
-        val_count = max(1, int(round(0.2 * len(class_records))))
-        val_count = min(val_count, len(class_records) - 1)
-        val_records.extend(class_records[:val_count])
-        train_records.extend(class_records[val_count:])
-
-    return train_records, val_records
+    return fold_splits
 
 
 def collate_batch(
@@ -270,7 +329,7 @@ def contrastive_loss(image_features: torch.Tensor, text_features: torch.Tensor, 
 
 
 def freeze_for_finetuning(model: CLIPModel) -> None:
-    """Freeze CLIP parameters except the last three vision blocks and visual projection.
+    """Freeze CLIP parameters except the last five vision blocks and visual projection.
 
     Args:
         model: CLIP model to prepare for fine-tuning.
@@ -279,7 +338,7 @@ def freeze_for_finetuning(model: CLIPModel) -> None:
     for parameter in model.parameters():
         parameter.requires_grad = False
 
-    for layer_index in (9, 10, 11):
+    for layer_index in TRAINABLE_VISION_BLOCKS:
         for parameter in model.vision_model.encoder.layers[layer_index].parameters():
             parameter.requires_grad = True
 
@@ -336,7 +395,6 @@ def encode_prompt_ensembles(
     """
 
     class_embeddings: list[torch.Tensor] = []
-
     for monument_name in class_names:
         encoded = processor(
             text=PROMPT_ENSEMBLES[monument_name],
@@ -359,28 +417,33 @@ def evaluate_zero_shot_top1(
     dataloader: DataLoader,
     device: torch.device,
     class_names: list[str],
-) -> float:
-    """Evaluate validation accuracy with the prompt ensembles from ``app.py``.
+    split_name: str,
+) -> tuple[float, dict[str, float]]:
+    """Evaluate top-1 accuracy and print a per-class breakdown for a split.
 
     Args:
         model: CLIP model being fine-tuned.
-        processor: CLIP processor for validation image preprocessing.
-        dataloader: Validation dataloader.
+        processor: CLIP processor for evaluation image preprocessing.
+        dataloader: Evaluation dataloader.
         device: Torch device for evaluation.
         class_names: Available class names that should be evaluated.
+        split_name: Human-readable name of the evaluated split.
 
     Returns:
-        float: Top-1 validation accuracy in ``[0, 1]``.
+        tuple[float, dict[str, float]]: Overall accuracy and per-class accuracies.
     """
 
     if len(dataloader.dataset) == 0:
-        return 0.0
+        return 0.0, {}
 
     class_names, class_embeddings = encode_prompt_ensembles(model, processor, device, class_names)
     class_to_index = {name: index for index, name in enumerate(class_names)}
 
     correct = 0
     total = 0
+    class_correct: defaultdict[str, int] = defaultdict(int)
+    class_total: defaultdict[str, int] = defaultdict(int)
+
     for batch_inputs, labels in dataloader:
         image_only_inputs = {"pixel_values": batch_inputs["pixel_values"].to(device)}
         image_features = extract_image_features(model, image_only_inputs["pixel_values"])
@@ -389,10 +452,21 @@ def evaluate_zero_shot_top1(
         predictions = logits.argmax(dim=-1).detach().cpu().tolist()
 
         for predicted_index, label in zip(predictions, labels):
+            if predicted_index == class_to_index[label]:
+                class_correct[label] += 1
+            class_total[label] += 1
             correct += int(predicted_index == class_to_index[label])
             total += 1
 
-    return correct / total if total else 0.0
+    per_class_accuracy = {
+        class_name: class_correct[class_name] / class_total[class_name]
+        for class_name in class_total
+    }
+    print(f"\nPer-class accuracy ({split_name}):")
+    for class_name in sorted(class_total):
+        print(f"{class_name}: {per_class_accuracy[class_name] * 100:.2f}%")
+
+    return (correct / total if total else 0.0), per_class_accuracy
 
 
 def save_checkpoint(
@@ -455,8 +529,8 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
     total_batches = 0
-
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
+
     for batch_inputs, _ in progress_bar:
         batch_inputs = move_batch_to_device(batch_inputs, device)
         optimizer.zero_grad(set_to_none=True)
@@ -485,26 +559,49 @@ def train_one_epoch(
 def build_dataloaders(
     train_records: list[ImageRecord],
     val_records: list[ImageRecord],
+    test_records: list[ImageRecord],
     processor: CLIPProcessor,
     batch_size: int,
     use_cuda: bool,
-) -> tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders.
+    eval_seed_base: int,
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Create train, validation, and test dataloaders with original and augmented copies.
 
     Args:
         train_records: Training split records.
         val_records: Validation split records.
+        test_records: Test split records.
         processor: CLIP processor for collate-time preprocessing.
         batch_size: Dataloader batch size.
         use_cuda: Whether CUDA is available for faster host-to-device transfer.
+        eval_seed_base: Base seed used to make val/test augmented copies deterministic.
 
     Returns:
-        tuple[DataLoader, DataLoader]: Training and validation dataloaders.
+        tuple[DataLoader, DataLoader, DataLoader]: Training, validation, and test dataloaders.
     """
 
-    train_transform, val_transform = build_transforms()
-    train_dataset = MughalMonumentDataset(train_records, transform=train_transform)
-    val_dataset = MughalMonumentDataset(val_records, transform=val_transform)
+    original_transform, augmented_transform = build_transforms()
+    train_dataset = MughalMonumentDataset(
+        records=train_records,
+        original_transform=original_transform,
+        augmented_transform=augmented_transform,
+        include_augmented_copy=True,
+        deterministic_seed_base=None,
+    )
+    val_dataset = MughalMonumentDataset(
+        records=val_records,
+        original_transform=original_transform,
+        augmented_transform=augmented_transform,
+        include_augmented_copy=True,
+        deterministic_seed_base=eval_seed_base,
+    )
+    test_dataset = MughalMonumentDataset(
+        records=test_records,
+        original_transform=original_transform,
+        augmented_transform=augmented_transform,
+        include_augmented_copy=True,
+        deterministic_seed_base=eval_seed_base + 10000,
+    )
     collate_fn = partial(collate_batch, processor=processor)
 
     train_loader = DataLoader(
@@ -523,70 +620,111 @@ def build_dataloaders(
         pin_memory=use_cuda,
         collate_fn=collate_fn,
     )
-    return train_loader, val_loader
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=use_cuda,
+        collate_fn=collate_fn,
+    )
+    return train_loader, val_loader, test_loader
 
 
-def main() -> None:
-    """Run the full CLIP fine-tuning workflow from the command line."""
+def run_fold_training(
+    args: argparse.Namespace,
+    run_index: int,
+    fold_index: int,
+    train_records: list[ImageRecord],
+    val_records: list[ImageRecord],
+    test_records: list[ImageRecord],
+    class_names: list[str],
+    device: torch.device,
+    use_amp: bool,
+    global_best_val_top1: float,
+    run_seed: int,
+) -> tuple[dict[str, Any], float]:
+    """Train and evaluate one fold, using validation for selection and test for reporting.
 
-    args = parse_args()
-    set_seed(SEED)
+    Args:
+        args: Parsed command-line arguments.
+        run_index: One-based run index.
+        fold_index: One-based fold index.
+        train_records: Training split records.
+        val_records: Validation split records.
+        test_records: Test split records.
+        class_names: Class names available in the dataset.
+        device: Torch device for training and evaluation.
+        use_amp: Whether mixed precision should be enabled.
+        global_best_val_top1: Best validation score seen so far across all runs/folds.
+        run_seed: Seed assigned to the enclosing run.
 
-    expected_training_classes = SPECIALIST_CLUSTER
-    records, class_counts = collect_image_records(args.data_dir)
-    class_names = sorted(set(record.monument_name for record in records))
-    warn_underpopulated_classes(expected_training_classes, class_counts)
-
-    if len(records) < 2:
-        print("Not enough images were found to create a train/validation split. Exiting without training.")
-        return
-
-    train_records, val_records = split_records(records)
-    print(f"Discovered {len(records)} images across {sum(count > 0 for count in class_counts.values())} populated classes.")
-    print(f"Train images: {len(train_records)} | Val images: {len(val_records)}")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    use_amp = device.type == "cuda"
+    Returns:
+        tuple[dict[str, Any], float]: Fold summary and updated global best validation accuracy.
+    """
 
     processor = CLIPProcessor.from_pretrained(MODEL_NAME)
     model = CLIPModel.from_pretrained(MODEL_NAME).to(device)
     freeze_for_finetuning(model)
     print_parameter_summary(model)
 
-    train_loader, val_loader = build_dataloaders(train_records, val_records, processor, args.batch_size, use_amp)
-
+    eval_seed_base = run_seed * 100 + fold_index
+    train_loader, val_loader, test_loader = build_dataloaders(
+        train_records=train_records,
+        val_records=val_records,
+        test_records=test_records,
+        processor=processor,
+        batch_size=args.batch_size,
+        use_cuda=use_amp,
+        eval_seed_base=eval_seed_base,
+    )
     optimizer = AdamW((parameter for parameter in model.parameters() if parameter.requires_grad), lr=1e-6, weight_decay=0.01)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = GradScaler(enabled=use_amp)
 
     best_val_top1 = -1.0
+    best_test_top1 = 0.0
     best_epoch = 0
     epochs_without_improvement = 0
     epochs_ran = 0
+    best_per_class_accuracy: dict[str, float] = {}
 
     for epoch_index in range(args.epochs):
         epochs_ran = epoch_index + 1
         train_loss = train_one_epoch(model, train_loader, optimizer, scaler, device, use_amp)
         model.eval()
-        val_top1 = evaluate_zero_shot_top1(model, processor, val_loader, device, class_names)
+        val_top1, _ = evaluate_zero_shot_top1(model, processor, val_loader, device, class_names, "validation")
+        test_top1, test_per_class_accuracy = evaluate_zero_shot_top1(model, processor, test_loader, device, class_names, "test")
         scheduler.step()
 
-        print(f"Epoch {epoch_index + 1} | train_loss: {train_loss:.4f} | val_top1: {val_top1 * 100:.1f}%")
+        print(
+            f"Fold {fold_index} | Epoch {epoch_index + 1} | "
+            f"train_loss: {train_loss:.4f} | val_top1: {val_top1 * 100:.1f}% | test_top1: {test_top1 * 100:.1f}%"
+        )
 
         if val_top1 > best_val_top1:
             best_val_top1 = val_top1
+            best_test_top1 = test_top1
             best_epoch = epoch_index + 1
+            best_per_class_accuracy = test_per_class_accuracy
             epochs_without_improvement = 0
-            training_log = {
-                "epochs_run": epochs_ran,
-                "best_val_top1": best_val_top1,
-                "best_epoch": best_epoch,
-                "class_names": class_names,
-                "base_model": MODEL_NAME,
-                "frozen_layers": "text_model + text_projection + vision layers 0-8",
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-            save_checkpoint(model, processor, args.output_dir, training_log)
+
+            if val_top1 > global_best_val_top1:
+                global_best_val_top1 = val_top1
+                training_log = {
+                    "epochs_run": epochs_ran,
+                    "best_val_top1": best_val_top1,
+                    "best_test_top1": best_test_top1,
+                    "best_epoch": best_epoch,
+                    "best_seed": run_seed,
+                    "best_run": run_index,
+                    "best_fold": fold_index,
+                    "class_names": class_names,
+                    "base_model": MODEL_NAME,
+                    "frozen_layers": "text_model + text_projection + vision layers 0-6",
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+                save_checkpoint(model, processor, args.output_dir, training_log)
         else:
             epochs_without_improvement += 1
 
@@ -594,20 +732,200 @@ def main() -> None:
             print("Early stopping: validation top-1 did not improve for 3 consecutive epochs.")
             break
 
-    final_log = {
-        "epochs_run": epochs_ran,
+    return {
+        "fold_index": fold_index,
         "best_val_top1": max(best_val_top1, 0.0),
+        "best_test_top1": best_test_top1,
         "best_epoch": best_epoch,
-        "class_names": class_names,
-        "base_model": MODEL_NAME,
-        "frozen_layers": "text_model + text_projection + vision layers 0-8",
-        "timestamp": datetime.utcnow().isoformat(),
+        "epochs_run": epochs_ran,
+        "per_class_accuracy": best_per_class_accuracy,
+    }, global_best_val_top1
+
+
+def run_training_once(
+    args: argparse.Namespace,
+    run_index: int,
+    run_seed: int,
+    device: torch.device,
+    use_amp: bool,
+    global_best_val_top1: float,
+) -> tuple[dict[str, Any], float]:
+    """Run one full k-fold cycle for a given seed.
+
+    Args:
+        args: Parsed command-line arguments.
+        run_index: One-based run index for logging.
+        run_seed: Random seed used for this run.
+        device: Torch device for training and evaluation.
+        use_amp: Whether mixed precision should be enabled.
+        global_best_val_top1: Best validation accuracy seen across earlier runs/folds.
+
+    Returns:
+        tuple[dict[str, Any], float]: Run summary and updated global best validation accuracy.
+    """
+
+    set_seed(run_seed)
+    records, class_counts = collect_image_records(args.data_dir)
+    class_names = sorted(set(record.monument_name for record in records))
+    warn_underpopulated_classes(class_names, class_counts)
+
+    if len(records) < 3:
+        return {
+            "run_index": run_index,
+            "seed": run_seed,
+            "record_count": len(records),
+            "class_names": class_names,
+            "fold_results": [],
+            "mean_val_top1": 0.0,
+            "mean_test_top1": 0.0,
+            "per_class_accuracy": {},
+        }, global_best_val_top1
+
+    fold_splits = build_fold_splits(records, run_seed)
+    if not fold_splits:
+        return {
+            "run_index": run_index,
+            "seed": run_seed,
+            "record_count": len(records),
+            "class_names": class_names,
+            "fold_results": [],
+            "mean_val_top1": 0.0,
+            "mean_test_top1": 0.0,
+            "per_class_accuracy": {},
+        }, global_best_val_top1
+
+    print(
+        f"Discovered {len(records)} images across {sum(count > 0 for count in class_counts.values())} populated classes. "
+        f"Using {len(fold_splits)} rotating folds for a full k-fold evaluation with an approximate 70/15/15 train/val/test split."
+    )
+
+    fold_results: list[dict[str, Any]] = []
+    per_class_results: defaultdict[str, list[float]] = defaultdict(list)
+    for fold_offset, (train_records, val_records, test_records) in enumerate(fold_splits, start=1):
+        print(
+            f"\n--- Run {run_index} | Fold {fold_offset}/{len(fold_splits)} ---\n"
+            f"Train images: {len(train_records)} | Val images: {len(val_records)} | Test images: {len(test_records)}"
+        )
+        fold_summary, global_best_val_top1 = run_fold_training(
+            args=args,
+            run_index=run_index,
+            fold_index=fold_offset,
+            train_records=train_records,
+            val_records=val_records,
+            test_records=test_records,
+            class_names=class_names,
+            device=device,
+            use_amp=use_amp,
+            global_best_val_top1=global_best_val_top1,
+            run_seed=run_seed,
+        )
+        fold_results.append(fold_summary)
+        for class_name, class_accuracy in fold_summary["per_class_accuracy"].items():
+            per_class_results[class_name].append(class_accuracy)
+
+    mean_val_top1 = float(np.mean([summary["best_val_top1"] for summary in fold_results]))
+    mean_test_top1 = float(np.mean([summary["best_test_top1"] for summary in fold_results]))
+    aggregated_per_class_accuracy = {
+        class_name: float(np.mean(class_accuracies))
+        for class_name, class_accuracies in per_class_results.items()
     }
 
-    if best_epoch > 0:
-        write_training_log(args.output_dir, final_log)
-    else:
-        print("Training finished without a validation improvement checkpoint. No model was saved.")
+    return {
+        "run_index": run_index,
+        "seed": run_seed,
+        "record_count": len(records),
+        "class_names": class_names,
+        "fold_results": fold_results,
+        "mean_val_top1": mean_val_top1,
+        "mean_test_top1": mean_test_top1,
+        "per_class_accuracy": aggregated_per_class_accuracy,
+    }, global_best_val_top1
+
+
+def main() -> None:
+    """Run repeated k-fold CLIP fine-tuning and aggregate validation/test metrics."""
+
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = device.type == "cuda"
+
+    run_summaries: list[dict[str, Any]] = []
+    global_best_val_top1 = -1.0
+
+    for run_idx in range(args.runs):
+        run_seed = args.seed + run_idx
+        print(f"\n=== Run {run_idx + 1}/{args.runs} | seed={run_seed} ===")
+        run_summary, global_best_val_top1 = run_training_once(
+            args=args,
+            run_index=run_idx + 1,
+            run_seed=run_seed,
+            device=device,
+            use_amp=use_amp,
+            global_best_val_top1=global_best_val_top1,
+        )
+
+        if run_summary["record_count"] < 3 or not run_summary["fold_results"]:
+            print("Not enough images were found to build rotating k-fold train/val/test splits. Exiting without training.")
+            return
+
+        run_summaries.append(run_summary)
+        print(
+            f"Run {run_summary['run_index']}: "
+            f"val={run_summary['mean_val_top1'] * 100:.1f}% | "
+            f"test={run_summary['mean_test_top1'] * 100:.1f}%"
+        )
+
+    val_results = [summary["mean_val_top1"] for summary in run_summaries]
+    test_results = [summary["mean_test_top1"] for summary in run_summaries]
+    mean_val_acc = float(np.mean(val_results))
+    std_val_acc = float(np.std(val_results))
+    mean_test_acc = float(np.mean(test_results))
+    std_test_acc = float(np.std(test_results))
+
+    print(f"\nFinal Results over {args.runs} runs:")
+    print(f"Mean Validation Accuracy: {mean_val_acc * 100:.2f}%")
+    print(f"Validation Std Dev: +/-{std_val_acc * 100:.2f}%")
+    print(f"Mean Test Accuracy: {mean_test_acc * 100:.2f}%")
+    print(f"Test Std Dev: +/-{std_test_acc * 100:.2f}%")
+
+    print("\nPer-class test accuracy across runs:")
+    aggregated_per_class_accuracy: dict[str, dict[str, float]] = {}
+    all_class_names = sorted({class_name for summary in run_summaries for class_name in summary["per_class_accuracy"]})
+    for class_name in all_class_names:
+        class_values = [
+            summary["per_class_accuracy"][class_name]
+            for summary in run_summaries
+            if class_name in summary["per_class_accuracy"]
+        ]
+        class_mean = float(np.mean(class_values))
+        class_std = float(np.std(class_values))
+        aggregated_per_class_accuracy[class_name] = {
+            "mean_accuracy": class_mean,
+            "std_accuracy": class_std,
+        }
+        print(f"{class_name}: {class_mean * 100:.2f}% +/- {class_std * 100:.2f}%")
+
+    final_log = {
+        "runs": args.runs,
+        "base_seed": args.seed,
+        "folds_per_run": len(run_summaries[0]["fold_results"]) if run_summaries else 0,
+        "run_results": run_summaries,
+        "mean_val_top1": mean_val_acc,
+        "std_val_top1": std_val_acc,
+        "mean_test_top1": mean_test_acc,
+        "std_test_top1": std_test_acc,
+        "best_val_top1": max(
+            fold_summary["best_val_top1"]
+            for summary in run_summaries
+            for fold_summary in summary["fold_results"]
+        ),
+        "class_names": run_summaries[0]["class_names"] if run_summaries else [],
+        "per_class_accuracy": aggregated_per_class_accuracy,
+        "base_model": MODEL_NAME,
+        "frozen_layers": "text_model + text_projection + vision layers 0-6",
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    write_training_log(args.output_dir, final_log)
 
 
 if __name__ == "__main__":

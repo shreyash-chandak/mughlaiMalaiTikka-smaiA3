@@ -151,6 +151,27 @@ Date: 2026-05-05
   - `data/Humayun's Tomb/`
 - These directories are placeholders only and were intentionally left empty.
 
+## Repeated seeded evaluation on 2026-05-05
+
+- Updated `train.py` to support:
+  - `--seed`
+  - `--runs`
+- Training now executes multiple repeated runs with seeds:
+  - `seed`
+  - `seed + 1`
+  - `seed + 2`
+  - and so on
+- Added final aggregate reporting:
+  - mean validation accuracy
+  - standard deviation
+  - per-class accuracy summary across runs
+- Added per-class accuracy printing during validation itself.
+- Added simple imbalance control:
+  - if a class has more than 80 images, `collect_image_records()` now randomly samples 80
+- Added explicit `numpy` dependency because the aggregate metrics now use:
+  - `np.mean(...)`
+  - `np.std(...)`
+
 ### `requirements.txt`
 
 - Added `streamlit-paste-button>=0.1.2`
@@ -215,3 +236,40 @@ Date: 2026-05-05
   - multi-view image scoring
   - family-aware reranking
   - richer input UX for live demos
+
+## 2026-05-05 - Specialist Cluster Expansion and K-Fold Sync
+
+### `app.py`
+
+- Replaced the earlier narrow specialist reranking assumption with four explicit specialist prompt clusters:
+  - Taj Mahal / Bibi Ka Maqbara / Itmad-ud-Daulah / Moti Masjid Agra / Jama Masjid Delhi
+  - Buland Darwaza / Tomb of Salim Chishti / Fatehpur Sikri
+  - Humayun's Tomb / Akbar's Tomb / Safdarjung Tomb
+  - Red Fort / Agra Fort
+- Added dataset-aware specialist activation:
+  - the app now scans `data/`
+  - only monuments with actual image files are activated in the specialist prompt groups
+  - singleton groups are still kept active so every populated monument remains represented
+  - multi-class groups still require at least 2 top candidates before reranking is applied
+- Updated specialist feature building and reranking to use the active populated groups rather than a static white-marble-only subset.
+- Updated specialist-model fallback loading so that, if the checkpoint log does not declare class names, the app falls back to the populated active specialist classes first.
+
+### `train.py`
+
+- Kept the rotating k-fold training/evaluation flow already present in the file and clarified it as:
+  - full k-fold rotation
+  - approximate `70 / 15 / 15` train / validation / test allocation
+- Synced under-populated-class warnings to the classes that are actually present in `data/` rather than the whole specialist superset.
+- Kept the current training improvements aligned with the brief:
+  - original plus augmented copies for train, validation, and test sets
+  - augmentation stack including random resized crop, flip, small rotation, light color jitter, and mild perspective warp
+  - fine-tuning of the last 5 vision blocks plus `visual_projection`
+
+### Reasoning
+
+- The main inference fix here is consistency:
+  - the app's specialist prompt clusters now reflect the same data reality as the trainer
+  - inactive classes no longer distort specialist reranking when there is no local evidence for them
+- The main training choice remains the 7-fold rotating split:
+  - exact `70 / 15 / 15` is not naturally expressible as a standard equal-fold k-fold partition
+  - 7 folds gives the cleanest practical approximation: `5/7` train, `1/7` validation, `1/7` test

@@ -63,3 +63,17 @@ Training script: train.py (created in Session 2)
 **Files modified:** `CONTEXT.md`, `REPORT_WORKLOG.md`, `data/`
 **Key decisions:** Used exact folder names from the code so training can read the dataset without any rename step.
 **Known issues / TODO:** The directories are empty placeholders only and must be populated with images before fine-tuning.
+
+## 2026-05-05 - Repeated Seeded Evaluation for train.py
+
+**What changed:** Updated `train.py` to support repeated seeded runs via `--seed` and `--runs`, aggregate mean and standard deviation of validation top-1 across runs, print per-class accuracy, and cap each class at 80 images during collection to reduce imbalance effects.
+**Files modified:** `train.py`, `requirements.txt`
+**Key decisions:** Kept the existing fine-tuning setup intact and wrapped it in a small `run_training_once()` helper rather than rewriting the full pipeline. Checkpoint saving now preserves the globally best run across repeated executions, while `training_log.json` stores aggregate run statistics afterward.
+**Known issues / TODO:** Repeated runs still reuse the same validation strategy rather than adding a separate test set, so the results remain an estimate rather than a final held-out benchmark.
+
+## 2026-05-05 - Data-Aware Specialist Clusters and Rotating K-Fold Sync
+
+**What changed:** Updated `app.py` so specialist prompt groups are no longer limited to the earlier white-marble subset. The app now defines four specialist clusters, filters them down to the monuments that actually have populated folders in `data/`, and uses those active groups for specialist reranking and fine-tuned specialist fallback loading. Updated `train.py` so under-population warnings now align with the classes that are actually present on disk, and clarified the logging around the existing rotating k-fold 70/15/15 train/val/test workflow.
+**Files modified:** `app.py`, `train.py`, `CONTEXT.md`, `REPORT_WORKLOG.md`
+**Key decisions:** Kept the full four-cluster prompt design in code so absent monuments can become active later without another refactor, but restricted the active specialist path to populated dataset folders to avoid training/app mismatch. Preserved the existing 7-fold rotating split design because it is the cleanest full k-fold approximation of a 70/15/15 train/validation/test allocation.
+**Known issues / TODO:** Some requested cluster members still have no local images in `data/`, so they remain defined but inactive until those folders are populated.

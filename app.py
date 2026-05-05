@@ -14,18 +14,32 @@ from transformers import CLIPModel, CLIPProcessor
 
 MODEL_NAME = "openai/clip-vit-base-patch32"
 FINETUNED_MODEL_DIR = "clip_mughal_finetuned"
+DATA_DIR = "data"
 OOD_THRESHOLD = 0.15  # Random chance is about 6.7% for 15 classes; 15% is a safer boundary between noise and a plausible match.
-SPECIALIST_CLUSTER = [
-    "Taj Mahal",
-    "Bibi Ka Maqbara",
-    "Itmad-ud-Daulah",
-    "Moti Masjid Agra",
-    "Red Fort",
-    "Agra Fort",
-    "Fatehpur Sikri",
-    "Jama Masjid Delhi",
-    "Humayun's Tomb",
-]
+SPECIALIST_GROUPS: dict[str, list[str]] = {
+    "marble_and_mosque_cluster": [
+        "Taj Mahal",
+        "Bibi Ka Maqbara",
+        "Itmad-ud-Daulah",
+        "Moti Masjid Agra",
+        "Jama Masjid Delhi",
+    ],
+    "fatehpur_cluster": [
+        "Buland Darwaza",
+        "Tomb of Salim Chishti",
+        "Fatehpur Sikri",
+    ],
+    "garden_tomb_cluster": [
+        "Humayun's Tomb",
+        "Akbar's Tomb",
+        "Safdarjung Tomb",
+    ],
+    "fort_cluster": [
+        "Red Fort",
+        "Agra Fort",
+    ],
+}
+SPECIALIST_CLUSTER = [monument for cluster in SPECIALIST_GROUPS.values() for monument in cluster]
 
 
 MONUMENT_PROFILES: dict[str, dict[str, Any]] = {
@@ -285,7 +299,7 @@ BASELINE_PROMPTS: dict[str, str] = {
 
 
 SPECIALIST_PROMPTS: dict[str, dict[str, list[str]]] = {
-    "white_marble_cluster": {
+    "marble_and_mosque_cluster": {
         "Taj Mahal": [
             "a huge white marble mausoleum with one dominant central dome, four free-standing minarets, and a long reflecting pool",
             "the Taj Mahal, a very large symmetrical Mughal tomb with four corner minarets around the main building",
@@ -302,8 +316,119 @@ SPECIALIST_PROMPTS: dict[str, dict[str, list[str]]] = {
             "a small jewel-box marble tomb with corner towers, delicate inlay, and fine lattice work",
             "Itmad-ud-Daulah, a compact white marble mausoleum with slender corner turrets and ornate surface details",
         ],
+        "Jama Masjid Delhi": [
+            "a grand congregational mosque with three marble domes, tall minarets, and a wide courtyard",
+            "Jama Masjid Delhi, a monumental red sandstone and white marble mosque reached by broad stairways",
+        ],
+    },
+    "fatehpur_cluster": {
+        "Buland Darwaza": [
+            "a colossal red sandstone gateway with a grand staircase and very high central arch",
+            "Buland Darwaza, a monumental Mughal entrance facade with calligraphy and towering gateway proportions",
+        ],
+        "Tomb of Salim Chishti": [
+            "a small white marble tomb with intricate jali screens and delicate carved surfaces",
+            "the Tomb of Salim Chishti, a compact square shrine in white marble set within the Fatehpur Sikri complex",
+        ],
+        "Fatehpur Sikri": [
+            "a wide Mughal imperial complex with courtyards, pavilions, and multiple red sandstone structures",
+            "Fatehpur Sikri, a large historic city complex rather than a single gateway or shrine",
+        ],
+    },
+    "garden_tomb_cluster": {
+        "Humayun's Tomb": [
+            "a grand red sandstone garden tomb with a high plinth and large white double dome",
+            "Humayun's Tomb, a monumental charbagh mausoleum with broad symmetrical facades",
+        ],
+        "Akbar's Tomb": [
+            "a multi-tiered Mughal tomb with terraces, chhatris, and a less dominant central dome",
+            "Akbar's Tomb, a sprawling sandstone mausoleum complex with layered pavilion-like upper levels",
+        ],
+        "Safdarjung Tomb": [
+            "a late Mughal garden tomb with a bulbous dome, four corner towers, and warm sandstone walls",
+            "Safdarjung Tomb, a symmetrical walled garden mausoleum with a central domed block and corner pavilions",
+        ],
+    },
+    "fort_cluster": {
+        "Red Fort": [
+            "a very large ceremonial Mughal fort with massive red sandstone walls and the Lahori Gate",
+            "Red Fort, a fortress-palace complex with long straight defensive walls and imperial gates",
+        ],
+        "Agra Fort": [
+            "a Mughal fort with curved red sandstone ramparts, layered gateways, and palace courtyards inside",
+            "Agra Fort, a sprawling fortified complex with heavy walls and internal marble palaces",
+        ],
     }
 }
+
+
+def discover_populated_data_classes(data_dir: str = DATA_DIR) -> set[str]:
+    """Return class-folder names in ``data/`` that contain at least one image file.
+
+    Args:
+        data_dir: Dataset root used by the training pipeline.
+
+    Returns:
+        set[str]: Populated class names discovered on disk.
+    """
+
+    valid_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+    populated_classes: set[str] = set()
+
+    if not os.path.isdir(data_dir):
+        return populated_classes
+
+    for class_name in os.listdir(data_dir):
+        class_dir = os.path.join(data_dir, class_name)
+        if not os.path.isdir(class_dir):
+            continue
+
+        if any(
+            os.path.isfile(os.path.join(class_dir, file_name))
+            and os.path.splitext(file_name)[1].lower() in valid_suffixes
+            for file_name in os.listdir(class_dir)
+        ):
+            populated_classes.add(class_name)
+
+    return populated_classes
+
+
+def get_active_specialist_prompts(data_dir: str = DATA_DIR) -> dict[str, dict[str, list[str]]]:
+    """Filter specialist clusters to the monuments that currently have data on disk.
+
+    If no populated dataset folders are found, the full prompt map is returned so the
+    app still works in pure inference/demo mode.
+
+    Args:
+        data_dir: Dataset root used to discover populated classes.
+
+    Returns:
+        dict[str, dict[str, list[str]]]: Active specialist prompt groups.
+    """
+
+    populated_classes = discover_populated_data_classes(data_dir)
+    if not populated_classes:
+        return SPECIALIST_PROMPTS
+
+    active_prompts: dict[str, dict[str, list[str]]] = {}
+    for group_name, group_prompts in SPECIALIST_PROMPTS.items():
+        filtered_group = {
+            monument_name: prompts
+            for monument_name, prompts in group_prompts.items()
+            if monument_name in populated_classes
+        }
+        if filtered_group:
+            active_prompts[group_name] = filtered_group
+
+    return active_prompts
+
+
+ACTIVE_SPECIALIST_PROMPTS = get_active_specialist_prompts()
+ACTIVE_SPECIALIST_CLUSTER = [
+    monument_name
+    for group_prompts in ACTIVE_SPECIALIST_PROMPTS.values()
+    for monument_name in group_prompts
+]
 
 
 CSS = """
@@ -803,7 +928,7 @@ def build_specialist_features(
 
     specialist_features: dict[str, dict[str, torch.Tensor]] = {}
 
-    for group_name, group_prompts in SPECIALIST_PROMPTS.items():
+    for group_name, group_prompts in ACTIVE_SPECIALIST_PROMPTS.items():
         specialist_features[group_name] = {}
         for monument_name, prompts in group_prompts.items():
             encoded = processor(text=prompts, return_tensors="pt", padding=True, truncation=True)
@@ -958,25 +1083,26 @@ def specialist_adjustment(
     """
 
     adjusted_scores = candidate_scores.copy()
-    top_candidates = sorted(candidate_scores.items(), key=lambda item: item[1], reverse=True)[:4]
+    top_candidates = sorted(candidate_scores.items(), key=lambda item: item[1], reverse=True)[:5]
     top_names = {name for name, _ in top_candidates}
-    white_cluster_names = set(SPECIALIST_PROMPTS["white_marble_cluster"].keys())
 
-    if len(top_names & white_cluster_names) < 2:
-        return adjusted_scores
+    for group_name, group_features in bank.specialist_features.items():
+        group_names = set(group_features.keys())
+        minimum_overlap = 1 if len(group_names) == 1 else 2
+        if len(top_names & group_names) < minimum_overlap:
+            continue
 
-    group_features = bank.specialist_features["white_marble_cluster"]
-    group_bonus: dict[str, float] = {}
+        group_bonus: dict[str, float] = {}
 
-    for monument_name, features in group_features.items():
-        specialist_scores = image_features @ features.T
-        mean_score = specialist_scores.mean().item()
-        max_score = specialist_scores.max().item()
-        group_bonus[monument_name] = 0.65 * mean_score + 0.35 * max_score
+        for monument_name, features in group_features.items():
+            specialist_scores = image_features @ features.T
+            mean_score = specialist_scores.mean().item()
+            max_score = specialist_scores.max().item()
+            group_bonus[monument_name] = 0.65 * mean_score + 0.35 * max_score
 
-    for monument_name, bonus in group_bonus.items():
-        if monument_name in adjusted_scores:
-            adjusted_scores[monument_name] += 0.45 * bonus
+        for monument_name, bonus in group_bonus.items():
+            if monument_name in adjusted_scores:
+                adjusted_scores[monument_name] += 0.45 * bonus
 
     return adjusted_scores
 
@@ -1054,7 +1180,7 @@ def load_clip() -> tuple[CLIPModel, CLIPProcessor, PromptBank, SpecialistBundle,
         specialist_log = load_training_log(FINETUNED_MODEL_DIR)
         specialist_class_names = specialist_log.get("class_names", [])
         if not specialist_class_names:
-            specialist_class_names = SPECIALIST_CLUSTER
+            specialist_class_names = ACTIVE_SPECIALIST_CLUSTER or SPECIALIST_CLUSTER
 
         specialist_prompts = {
             class_name: PROMPT_ENSEMBLES[class_name]
