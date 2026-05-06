@@ -818,12 +818,27 @@ button[kind="primary"]:hover {
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
+/* Dialog size — center of screen, ~50% each axis */
+[data-testid="stDialog"] > div,
+div[role="dialog"] {
+    max-width: 50vw !important;
+    width: 50vw !important;
+    max-height: 50vh !important;
+    margin: auto !important;
+}
+
 @media (max-width: 900px) {
     .hero-grid,
     .signal-strip,
     .method-row,
     .detail-grid {
         grid-template-columns: 1fr;
+    }
+    [data-testid="stDialog"] > div,
+    div[role="dialog"] {
+        max-width: 90vw !important;
+        width: 90vw !important;
+        max-height: 80vh !important;
     }
 }
 </style>
@@ -1696,6 +1711,28 @@ def show_visit_info_dialog(monument_name: str, info: dict[str, Any]) -> None:
     )
 
 
+@st.dialog("Top Scores", width="small")
+def show_top_scores_dialog(prediction: dict[str, Any]) -> None:
+    """Render the top prediction scores overlay dialog."""
+    st.markdown(
+        "<div style=\"font-family:'Cormorant Garamond',serif; font-size:1.4rem; color:#7e2330; margin-bottom:0.75rem;\">Top Candidates</div>",
+        unsafe_allow_html=True,
+    )
+    for candidate in prediction["results"][:5]:
+        st.markdown(
+            f"""
+            <div class="candidate-row">
+                <div>
+                    <div class="candidate-name">{candidate["name"]}</div>
+                    <div class="candidate-meta">{candidate["best_prompt"]}</div>
+                </div>
+                <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
     """Render the standard prediction panel for in-domain monument images.
 
@@ -1743,20 +1780,8 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
             if info:
                 show_visit_info_dialog(monument_name, info)
     with btn_col2:
-        with st.expander("See top scores"):
-            for candidate in prediction["results"][:5]:
-                st.markdown(
-                    f"""
-                    <div class="candidate-row">
-                        <div>
-                            <div class="candidate-name">{candidate["name"]}</div>
-                            <div class="candidate-meta">{candidate["best_prompt"]}</div>
-                        </div>
-                        <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        if st.button("› See Top Scores", use_container_width=True, type="primary"):
+            show_top_scores_dialog(prediction)
 
     # ── Right column ────────────────────────────────────────────────────────
     # Signals are returned so main() can render them in right_col
@@ -1857,37 +1882,50 @@ def main() -> None:
             st.markdown(
                 f"""
                 <div style="background:rgba(255,250,242,0.90); border:1px solid rgba(183,155,122,0.24);
-                     border-radius:22px; padding:1.2rem 1.4rem; box-shadow:0 10px 28px rgba(43,30,20,0.07);
-                     margin-bottom:1rem;">
+                     border-radius:22px; padding:0.75rem 1.1rem 0.8rem; box-shadow:0 10px 28px rgba(43,30,20,0.07);
+                     margin-bottom:0.75rem;">
                     <div style="text-transform:uppercase; letter-spacing:0.22em; font-size:0.72rem;
-                         color:#6d6258; margin-bottom:0.75rem;">Prediction</div>
-                    <h2 style="margin:0; font-size:2.6rem; line-height:1; color:#7e2330;
+                         color:#6d6258; margin-bottom:0.4rem;">Prediction</div>
+                    <h2 style="margin:0; font-size:2.4rem; line-height:1; color:#7e2330;
                          font-family:'Cormorant Garamond',serif;">{mn}</h2>
-                    {f'<div style="font-size:0.86rem; color:#6d6258; margin-top:0.2rem; font-style:italic;">📍 {nested_note}</div>' if nested_note else ''}
-                    <div style="color:#6d6258; margin-top:0.4rem; font-size:0.92rem;">Runner-up: {runner_up["name"]}</div>
+                    {f'<div style="font-size:0.82rem; color:#6d6258; margin-top:0.25rem; font-style:italic;">📍 {nested_note}</div>' if nested_note else ''}
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            # ── Monument image ───────────────────────────────────────────────
-            st.image(result_data["image"], use_container_width=True)
+            # ── Monument image (fixed 16:9 ratio, no overflow) ───────────────
+            import base64 as _b64mod, io as _io
+            _buf = _io.BytesIO()
+            result_data["image"].save(_buf, format="JPEG")
+            _b64 = _b64mod.b64encode(_buf.getvalue()).decode()
+            st.markdown(
+                f"""
+                <div style="position:relative; width:100%; padding-top:56.25%;
+                     border-radius:16px; overflow:hidden; margin-bottom:0.75rem;">
+                    <img src="data:image/jpeg;base64,{_b64}"
+                         style="position:absolute; inset:0; width:100%; height:100%;
+                                object-fit:cover; border-radius:16px;" />
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
             # ── Confidence signal strip ──────────────────────────────────────
             st.markdown(
                 f"""
-                <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0.85rem; margin-top:1rem;">
-                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
-                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence</div>
-                        <div style="font-size:1.15rem; font-weight:600; color:#1f1a14;">{result_data["confidence_pct"]}</div>
+                <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0.65rem; margin-top:0.5rem;">
+                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.65rem 0.85rem;">
+                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.25rem;">Confidence</div>
+                        <div style="font-size:1.1rem; font-weight:600; color:#1f1a14;">{result_data["confidence_pct"]}</div>
                     </div>
-                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
-                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence Band</div>
-                        <div style="font-size:1.15rem; font-weight:600; color:#1f1a14;">{result_data["conf_band"]}</div>
+                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.65rem 0.85rem;">
+                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.25rem;">Confidence Band</div>
+                        <div style="font-size:1.1rem; font-weight:600; color:#1f1a14;">{result_data["conf_band"]}</div>
                     </div>
-                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
-                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Top Gap</div>
-                        <div style="font-size:1.15rem; font-weight:600; color:#1f1a14;">{result_data["top_margin_str"]}</div>
+                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.65rem 0.85rem;">
+                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.25rem;">Top Gap</div>
+                        <div style="font-size:1.1rem; font-weight:600; color:#1f1a14;">{result_data["top_margin_str"]}</div>
                     </div>
                 </div>
                 """,
