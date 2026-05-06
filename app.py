@@ -797,6 +797,23 @@ h1, h2, h3, h4, .serif {
     padding: 0.2rem 0.8rem 0.8rem;
 }
 
+/* See Details primary button */
+button[kind="primary"] {
+    background: linear-gradient(135deg, #1f1a14 60%, #7e2330) !important;
+    border: none !important;
+    color: #f7ead1 !important;
+    font-family: 'Courier New', monospace !important;
+    font-weight: 700 !important;
+    font-size: 0.9rem !important;
+    letter-spacing: 0.04em !important;
+    border-radius: 12px !important;
+    padding: 0.6rem 1rem !important;
+}
+
+button[kind="primary"]:hover {
+    opacity: 0.88 !important;
+}
+
 [data-testid="stProgressBar"] > div > div {
     background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
@@ -1614,8 +1631,76 @@ def load_monument_metadata() -> dict[str, Any]:
     return {}
 
 
+@st.dialog("Visit Information", width="large")
+def show_visit_info_dialog(monument_name: str, info: dict[str, Any]) -> None:
+    """Render the Visit Information overlay dialog.
+
+    Args:
+        monument_name: Name of the predicted monument.
+        info: Metadata dict for the monument.
+    """
+    maps_url = f"https://www.google.com/maps/search/{info.get('maps_query', monument_name.replace(' ', '+'))}"
+    location = info.get("location", "—")
+    built_by = info.get("built_by", "—")
+    year = info.get("year", "—")
+    style = info.get("style", "—")
+    hours = info.get("opening_hours", "—")
+    ticket_indian = info.get("ticket_price_indian", "—")
+    ticket_foreign = info.get("ticket_price_foreign", "—")
+
+    st.markdown(
+        f"""
+        <div style="font-family:'Cormorant Garamond',serif; font-size:1.6rem; color:#7e2330; margin-bottom:1rem;">
+            {monument_name}
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:0.75rem;">
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Location</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{location}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Built By</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{built_by}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Period</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{year}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Style</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{style}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Opening Hours</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{hours}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Ticket (Indian)</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{ticket_indian}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.62rem; color:#6d6258; margin-bottom:0.3rem;">Ticket (Foreign)</div>
+                <div style="font-size:0.94rem; color:#1f1a14;">{ticket_foreign}</div>
+            </div>
+            <div style="background:rgba(255,250,242,0.95); border:1px solid #deceb6; border-radius:14px; padding:0.85rem 1rem; display:flex; align-items:center; justify-content:center;">
+                <a href="{maps_url}" target="_blank" style="
+                    display:inline-flex; align-items:center; gap:0.45rem;
+                    background:linear-gradient(135deg,#9b6b2f,#7e2330);
+                    color:white; padding:0.6rem 1.1rem; border-radius:10px;
+                    text-decoration:none; font-weight:600; font-size:0.85rem;
+                ">📍 Open in Google Maps</a>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
     """Render the standard prediction panel for in-domain monument images.
+
+    Two-column layout: left = upload area + history + action buttons;
+    right = prediction title + monument image + confidence signal strip.
 
     Args:
         image: Input image displayed back to the user.
@@ -1626,162 +1711,65 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
     monument_name = top_result["name"]
     conf_band = confidence_band(top_result["probability"], prediction["top_margin"])
     runner_up = prediction["results"][1] if len(prediction["results"]) > 1 else top_result
-
-    # Nested context sub-note for sub-monuments
     nested_note = NESTED_CONTEXTS.get(monument_name, "")
-
-    st.image(image, use_container_width=True)
-
-    # ── Title block ──
-    st.markdown(
-        f"""<div style="background:rgba(255,250,242,0.90); border:1px solid rgba(183,155,122,0.24); border-radius:22px; padding:1.2rem; box-shadow:0 10px 28px rgba(43,30,20,0.07);">
-        <div style="text-transform:uppercase; letter-spacing:0.22em; font-size:0.72rem; color:#6d6258; margin-bottom:0.85rem;">Prediction</div>
-        <h2 style="margin:0; font-size:2.5rem; line-height:1; color:#7e2330; font-family:'Cormorant Garamond',serif;">{monument_name}</h2>
-        {
-            f'<div style="font-size:0.88rem; color:var(--muted); margin-top:0.15rem; font-style:italic;">📍 {nested_note}</div>'
-            if nested_note
-            else ""
-        }
-        <div style="color:#6d6258; margin-top:0.35rem; font-size:0.94rem;">Runner-up: {runner_up['name']}</div>
-        </div> """,
-        unsafe_allow_html=True,
-    )
-
-    # ── Signal strip — separate call so formatting issues don't silently suppress it ──
-    top_margin_str = f"{prediction['top_margin']:.3f}"   # compute outside the f-string
+    top_margin_str = f"{prediction['top_margin']:.3f}"
     confidence_pct = f"{top_result['probability'] * 100:.1f}%"
 
-    st.markdown(
-        f"""
-        <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0.85rem; margin-top:1rem;">
-            <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
-                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence</div>
-                <div style="font-size:1.1rem; color:#1f1a14;">{confidence_pct}</div>
-            </div>
-            <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
-                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence Band</div>
-                <div style="font-size:1.1rem; color:#1f1a14;">{conf_band}</div>
-            </div>
-            <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
-                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Top Gap</div>
-                <div style="font-size:1.1rem; color:#1f1a14;">{top_margin_str}</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.progress(float(top_result["probability"]))
-    caption_parts = [
-        f"{prediction['prompt_count']} prompts",
-        f"{prediction['view_count']} image views",
-        f"runner-up: {runner_up['name']}",
-        f"Model Used: {prediction.get('model_used', 'CLIP')}",
-    ]
-    if prediction.get("refined_by_specialist"):
-        caption_parts.append(f"specialist refinement active ({prediction.get('specialist_cluster', 'cluster')})")
-    st.caption(" | ".join(caption_parts))
-
-    if False and conf_band == "Low":
-        st.warning(
-            "Low-confidence result. The top two classes are close, so treat this prediction cautiously.",
-            icon="⚠️",
-        )
-
-    # ── Monument info card from metadata.json ──────────────────────────────
     metadata = load_monument_metadata()
-    info = metadata.get(monument_name)
-    if info:
-        maps_url = f"https://www.google.com/maps/search/{info.get('maps_query', monument_name.replace(' ', '+'))}"
-        history_text = info.get("history", "")
-        fun_fact = info.get("fun_fact", "")
-        location = info.get("location", "")
-        built_by = info.get("built_by", "")
-        year = info.get("year", "")
-        style = info.get("style", "")
-        hours = info.get("opening_hours", "")
-        ticket_indian = info.get("ticket_price_indian", "")
-        ticket_foreign = info.get("ticket_price_foreign", "")
+    info = metadata.get(monument_name, {})
+    history_text = info.get("history", "")
+    fun_fact = info.get("fun_fact", "")
 
-        # History paragraph
-        if history_text:
-            st.markdown(
-                f"""
-                <div class="panel" style="margin-top: 1rem;">
-                    <div class="section-label">History</div>
-                    <p style="line-height: 1.7; color: var(--ink); font-size: 0.95rem; margin: 0;">{history_text}</p>
-                    {f'<p style="margin-top: 0.8rem; font-size: 0.88rem; color: var(--muted); font-style: italic;">💡 {fun_fact}</p>' if fun_fact else ''}
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    # ── Left column: history card + action buttons ──────────────────────────
+    # (This is called from within the already-open left_col context in main())
 
-        # Visit info card
+    if history_text:
         st.markdown(
             f"""
-            <div class="panel" style="margin-top: 1rem;">
-                <div class="section-label">Visit Information</div>
-                <div class="detail-grid">
-                    <div class="detail-card">
-                        <div class="detail-label">Location</div>
-                        <div class="detail-value">{location}</div>
-                    </div>
-                    <div class="detail-card">
-                        <div class="detail-label">Built By</div>
-                        <div class="detail-value">{built_by}</div>
-                    </div>
-                    <div class="detail-card">
-                        <div class="detail-label">Period</div>
-                        <div class="detail-value">{year}</div>
-                    </div>
-                    <div class="detail-card">
-                        <div class="detail-label">Style</div>
-                        <div class="detail-value">{style}</div>
-                    </div>
-                    <div class="detail-card">
-                        <div class="detail-label">Opening Hours</div>
-                        <div class="detail-value">{hours}</div>
-                    </div>
-                    <div class="detail-card">
-                        <div class="detail-label">Ticket (Indian)</div>
-                        <div class="detail-value">{ticket_indian}</div>
-                    </div>
-                    <div class="detail-card">
-                        <div class="detail-label">Ticket (Foreign)</div>
-                        <div class="detail-value">{ticket_foreign}</div>
-                    </div>
-                    <div class="detail-card" style="display: flex; align-items: center; justify-content: center;">
-                        <a href="{maps_url}" target="_blank" style="
-                            display: inline-flex; align-items: center; gap: 0.5rem;
-                            background: linear-gradient(135deg, var(--accent), var(--accent-3));
-                            color: white; padding: 0.65rem 1.2rem; border-radius: 12px;
-                            text-decoration: none; font-weight: 600; font-size: 0.88rem;
-                            transition: opacity 0.2s;
-                        " onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
-                            📍 Open in Google Maps
-                        </a>
-                    </div>
-                </div>
+            <div class="panel" style="margin-top:1.2rem;">
+                <div class="section-label">History</div>
+                <p style="line-height:1.7; color:var(--ink); font-size:0.94rem; margin:0;">{history_text}</p>
+                {f'<p style="margin-top:0.75rem; font-size:0.86rem; color:var(--muted); font-style:italic;">💡 {fun_fact}</p>' if fun_fact else ''}
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    # ── Top scores ─────────────────────────────────────────────────────────
-    with st.expander("See top scores"):
-        for candidate in prediction["results"][:5]:
-            st.markdown(
-                f"""
-                <div class="candidate-row">
-                    <div>
-                        <div class="candidate-name">{candidate["name"]}</div>
-                        <div class="candidate-meta">{candidate["best_prompt"]}</div>
+    st.markdown("<div style='margin-top:1rem;'></div>", unsafe_allow_html=True)
+
+    btn_col1, btn_col2 = st.columns(2, gap="small")
+    with btn_col1:
+        if st.button("› See Details", use_container_width=True, type="primary"):
+            if info:
+                show_visit_info_dialog(monument_name, info)
+    with btn_col2:
+        with st.expander("See top scores"):
+            for candidate in prediction["results"][:5]:
+                st.markdown(
+                    f"""
+                    <div class="candidate-row">
+                        <div>
+                            <div class="candidate-name">{candidate["name"]}</div>
+                            <div class="candidate-meta">{candidate["best_prompt"]}</div>
+                        </div>
+                        <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
                     </div>
-                    <div class="candidate-score">{candidate["probability"] * 100:.1f}%</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    # ── Right column ────────────────────────────────────────────────────────
+    # Signals are returned so main() can render them in right_col
+    return {
+        "monument_name": monument_name,
+        "nested_note": nested_note,
+        "runner_up": runner_up,
+        "confidence_pct": confidence_pct,
+        "conf_band": conf_band,
+        "top_margin_str": top_margin_str,
+        "image": image,
+        "prediction": prediction,
+    }
 
 
 def main() -> None:
@@ -1798,6 +1786,11 @@ def main() -> None:
 
     left_col, right_col = st.columns([1.0, 1.25], gap="large")
 
+    # ── Run inference before splitting UI so result flows into both columns ──
+    selected_image: Image.Image | None = None
+    prediction: dict[str, Any] | None = None
+    result_data: dict[str, Any] | None = None
+
     with left_col:
         st.markdown('<div class="section-label">Upload Image</div>', unsafe_allow_html=True)
         source = st.radio(
@@ -1806,8 +1799,6 @@ def main() -> None:
             horizontal=True,
             label_visibility="collapsed",
         )
-
-        selected_image: Image.Image | None = None
 
         if source == "Upload file":
             uploaded = st.file_uploader(
@@ -1828,21 +1819,8 @@ def main() -> None:
             camera_capture = st.camera_input("Take a monument photo")
             selected_image = image_from_camera(camera_capture)
 
-    with right_col:
-        if selected_image is None:
-            st.markdown(
-                """
-                <div class="empty-state">
-                    <div class="section-label">Awaiting Image</div>
-                    <div class="empty-state-title serif">Upload a monument photo</div>
-                    <div class="empty-state-copy">
-                        Use upload, paste, or camera on the left. The right panel will show the image and ranked class scores.
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        else:
+        # Run inference here so results are available for both columns
+        if selected_image is not None:
             model, processor, bank, specialist_bundle, device, _ = load_clip()
             with st.spinner("Running monument analysis..."):
                 prediction = predict(selected_image, model, processor, bank, device)
@@ -1850,10 +1828,81 @@ def main() -> None:
                 prediction = refine_with_specialist(selected_image, prediction, specialist_bundle, device)
                 if prediction.get("refined_by_specialist"):
                     prediction["model_used"] = "Finetuned"
-            if prediction["is_ood"]:
-                render_ood_panel(prediction)
+
+            if not prediction["is_ood"]:
+                # render_result_panel renders left-column content and returns right-column data
+                result_data = render_result_panel(selected_image, prediction)
             else:
-                render_result_panel(selected_image, prediction)
+                render_ood_panel(prediction)
+
+    with right_col:
+        if selected_image is None or prediction is None:
+            st.markdown(
+                """
+                <div class="empty-state">
+                    <div class="section-label">Awaiting Image</div>
+                    <div class="empty-state-title serif">Upload a monument photo</div>
+                    <div class="empty-state-copy">
+                        Use upload, paste, or camera on the left. The right panel will show the prediction, image and confidence scores.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif result_data is not None:
+            # ── Prediction title card ────────────────────────────────────────
+            mn = result_data["monument_name"]
+            nested_note = result_data["nested_note"]
+            runner_up = result_data["runner_up"]
+            st.markdown(
+                f"""
+                <div style="background:rgba(255,250,242,0.90); border:1px solid rgba(183,155,122,0.24);
+                     border-radius:22px; padding:1.2rem 1.4rem; box-shadow:0 10px 28px rgba(43,30,20,0.07);
+                     margin-bottom:1rem;">
+                    <div style="text-transform:uppercase; letter-spacing:0.22em; font-size:0.72rem;
+                         color:#6d6258; margin-bottom:0.75rem;">Prediction</div>
+                    <h2 style="margin:0; font-size:2.6rem; line-height:1; color:#7e2330;
+                         font-family:'Cormorant Garamond',serif;">{mn}</h2>
+                    {f'<div style="font-size:0.86rem; color:#6d6258; margin-top:0.2rem; font-style:italic;">📍 {nested_note}</div>' if nested_note else ''}
+                    <div style="color:#6d6258; margin-top:0.4rem; font-size:0.92rem;">Runner-up: {runner_up["name"]}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # ── Monument image ───────────────────────────────────────────────
+            st.image(result_data["image"], use_container_width=True)
+
+            # ── Confidence signal strip ──────────────────────────────────────
+            st.markdown(
+                f"""
+                <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0.85rem; margin-top:1rem;">
+                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
+                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence</div>
+                        <div style="font-size:1.15rem; font-weight:600; color:#1f1a14;">{result_data["confidence_pct"]}</div>
+                    </div>
+                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
+                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence Band</div>
+                        <div style="font-size:1.15rem; font-weight:600; color:#1f1a14;">{result_data["conf_band"]}</div>
+                    </div>
+                    <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
+                        <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Top Gap</div>
+                        <div style="font-size:1.15rem; font-weight:600; color:#1f1a14;">{result_data["top_margin_str"]}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.progress(float(result_data["prediction"]["results"][0]["probability"]))
+            caption_parts = [
+                f"{result_data['prediction']['prompt_count']} prompts",
+                f"{result_data['prediction']['view_count']} image views",
+                f"Model Used: {result_data['prediction'].get('model_used', 'CLIP')}",
+            ]
+            if result_data["prediction"].get("refined_by_specialist"):
+                caption_parts.append(f"specialist refinement active ({result_data['prediction'].get('specialist_cluster', 'cluster')})")
+            st.caption(" | ".join(caption_parts))
 
 
 if __name__ == "__main__":
