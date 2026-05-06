@@ -819,13 +819,6 @@ button[kind="primary"]:hover {
 }
 
 /* Dialog size — center of screen, ~50% each axis */
-[data-testid="stDialog"] > div,
-div[role="dialog"] {
-    max-width: 50vw !important;
-    width: 50vw !important;
-    max-height: 50vh !important;
-    margin: auto !important;
-}
 
 @media (max-width: 900px) {
     .hero-grid,
@@ -833,12 +826,6 @@ div[role="dialog"] {
     .method-row,
     .detail-grid {
         grid-template-columns: 1fr;
-    }
-    [data-testid="stDialog"] > div,
-    div[role="dialog"] {
-        max-width: 90vw !important;
-        width: 90vw !important;
-        max-height: 80vh !important;
     }
 }
 </style>
