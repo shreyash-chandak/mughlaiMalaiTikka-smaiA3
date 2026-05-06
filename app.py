@@ -20,7 +20,6 @@ try:
 except ModuleNotFoundError:
     paste_image_button = None
 
-st.write("Text color:", st.get_option("theme.textColor"))
 MODEL_NAME = "openai/clip-vit-base-patch32"
 FINETUNED_MODEL_DIR = "platynator/clip-mughal-model"
 DATA_DIR = "data"
@@ -1160,36 +1159,20 @@ def get_cluster_name(monument_name: str) -> str | None:
 
 
 def resolve_model_status(model_dir: str) -> ModelStatus:
-    """Determine whether the app should present a base or fine-tuned model badge.
-
-    Args:
-        model_dir: Candidate fine-tuned checkpoint directory.
-
-    Returns:
-        ModelStatus: Badge metadata for the UI.
-    """
-
-    config_path = os.path.join(model_dir, "config.json")
-    if not os.path.exists(config_path):
+    try:
+        from transformers import CLIPModel
+        CLIPModel.from_pretrained(model_dir)
+        return ModelStatus(
+            is_finetuned=True,
+            badge_text="✦ Hybrid model active",
+            badge_class="model-badge-active",
+        )
+    except Exception:
         return ModelStatus(
             is_finetuned=False,
             badge_text="◦ Base CLIP model (zero-shot)",
             badge_class="model-badge-base",
         )
-
-    training_log = load_training_log(model_dir)
-    best_val_top1 = training_log.get("best_val_top1")
-    if isinstance(best_val_top1, (float, int)):
-        badge_text = f"✦ Hybrid model active · specialist val top-1 {best_val_top1 * 100:.1f}%"
-    else:
-        badge_text = "✦ Hybrid model active"
-
-    return ModelStatus(
-        is_finetuned=True,
-        badge_text=badge_text,
-        badge_class="model-badge-active",
-        best_val_top1=float(best_val_top1) if isinstance(best_val_top1, (float, int)) else None,
-    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -1646,30 +1629,42 @@ def render_result_panel(image: Image.Image, prediction: dict[str, Any]) -> None:
 
     # Nested context sub-note for sub-monuments
     nested_note = NESTED_CONTEXTS.get(monument_name, "")
-    nested_html = f'<div style="font-size: 0.88rem; color: var(--muted); margin-top: 0.15rem; font-style: italic;">📍 {nested_note}</div>' if nested_note else ""
 
     st.image(image, use_container_width=True)
 
+    # ── Title block ──
+    st.markdown(
+        f"""<div style="background:rgba(255,250,242,0.90); border:1px solid rgba(183,155,122,0.24); border-radius:22px; padding:1.2rem; box-shadow:0 10px 28px rgba(43,30,20,0.07);">
+        <div style="text-transform:uppercase; letter-spacing:0.22em; font-size:0.72rem; color:#6d6258; margin-bottom:0.85rem;">Prediction</div>
+        <h2 style="margin:0; font-size:2.5rem; line-height:1; color:#7e2330; font-family:'Cormorant Garamond',serif;">{monument_name}</h2>
+        {
+            f'<div style="font-size:0.88rem; color:var(--muted); margin-top:0.15rem; font-style:italic;">📍 {nested_note}</div>'
+            if nested_note
+            else ""
+        }
+        <div style="color:#6d6258; margin-top:0.35rem; font-size:0.94rem;">Runner-up: {runner_up['name']}</div>
+        </div> """,
+        unsafe_allow_html=True,
+    )
+
+    # ── Signal strip — separate call so formatting issues don't silently suppress it ──
+    top_margin_str = f"{prediction['top_margin']:.3f}"   # compute outside the f-string
+    confidence_pct = f"{top_result['probability'] * 100:.1f}%"
+
     st.markdown(
         f"""
-        <div class="panel">
-            <div class="section-label">Prediction</div>
-            <h2 class="result-title serif">{monument_name}</h2>
-            {nested_html}
-            <div class="result-subtitle">Runner-up: {runner_up["name"]}</div>
-            <div class="signal-strip">
-                <div class="signal-card">
-                    <div class="signal-label">Confidence</div>
-                    <div class="signal-value">{top_result["probability"] * 100:.1f}%</div>
-                </div>
-                <div class="signal-card">
-                    <div class="signal-label">Confidence Band</div>
-                    <div class="signal-value">{conf_band}</div>
-                </div>
-                <div class="signal-card">
-                    <div class="signal-label">Top Gap</div>
-                    <div class="signal-value">{prediction["top_margin"]:.3f}</div>
-                </div>
+        <div style="display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0.85rem; margin-top:1rem;">
+            <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence</div>
+                <div style="font-size:1.1rem; color:#1f1a14;">{confidence_pct}</div>
+            </div>
+            <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Confidence Band</div>
+                <div style="font-size:1.1rem; color:#1f1a14;">{conf_band}</div>
+            </div>
+            <div style="background:white; border:1px solid #deceb6; border-radius:16px; padding:0.9rem 1rem;">
+                <div style="text-transform:uppercase; letter-spacing:0.18em; font-size:0.66rem; color:#6d6258; margin-bottom:0.35rem;">Top Gap</div>
+                <div style="font-size:1.1rem; color:#1f1a14;">{top_margin_str}</div>
             </div>
         </div>
         """,
@@ -1804,7 +1799,6 @@ def main() -> None:
     left_col, right_col = st.columns([1.0, 1.25], gap="large")
 
     with left_col:
-        st.markdown('<div class="panel panel-tight">', unsafe_allow_html=True)
         st.markdown('<div class="section-label">Upload Image</div>', unsafe_allow_html=True)
         source = st.radio(
             "Choose how to provide the monument image",
@@ -1833,8 +1827,6 @@ def main() -> None:
         else:
             camera_capture = st.camera_input("Take a monument photo")
             selected_image = image_from_camera(camera_capture)
-
-        st.markdown("</div>", unsafe_allow_html=True)
 
     with right_col:
         if selected_image is None:
